@@ -18,6 +18,7 @@ use crate::api::result::{ErrorCode, ResultMessage};
 use crate::api::routing::Classification;
 use crate::clock::now_millis;
 use crate::dispatch::message::{Claimed, Dispatch};
+use crate::dispatch::writer::OutcomeBudget;
 use crate::gate::release::Releases;
 use crate::gate::{SharedGate, Verdict};
 use crate::merge::DispatchReceiver;
@@ -71,6 +72,7 @@ pub struct Worker {
     pub consume: CancellationToken,
     /// Abort in-flight work; it returns to its queue.
     pub drain: CancellationToken,
+    pub outcome_budget: OutcomeBudget,
 }
 
 struct Inflight<'a> {
@@ -170,14 +172,17 @@ impl Worker {
         };
         let end = self.decide(&mut envelope, &mut dispatching).await;
         match end {
-            End::Finish(result) => guard.finish(|claim| Outcome::Finish {
-                claim,
-                envelope,
-                result,
-            }),
+            End::Finish(result) => {
+                let reserved = self.outcome_budget.reserve(result.payload.len()).await;
+                guard.finish(reserved, |claim| Outcome::Finish {
+                    claim,
+                    envelope,
+                    result,
+                });
+            }
             End::Retry(secs) => {
                 let due_ms = now_millis().saturating_add((secs * 1000.0) as i64);
-                guard.finish(|claim| Outcome::Retry {
+                guard.finish(None, |claim| Outcome::Retry {
                     claim,
                     envelope,
                     due_ms,
@@ -443,11 +448,11 @@ impl Worker {
                 match response.body {
                     ResponseBody::Inline(body) => {
                         if (200..300).contains(&response.status)
-                            && let Some((input, output)) = parse_usage(&body, url)
+                            && let Some((input, output)) = parse_usage(body.as_bytes(), url)
                         {
                             self.metrics.tokens(labels, input, output);
                         }
-                        End::Finish(ResultMessage::http(envelope, response.status, &body))
+                        End::Finish(ResultMessage::http_text(envelope, response.status, body))
                     }
                     ResponseBody::Stored(stored) => End::Finish(ResultMessage::http_by_reference(
                         envelope,
@@ -535,8 +540,10 @@ mod tests {
     use crate::api::result::ErrorCode;
     use crate::boxed::BoxFuture;
     use crate::clock::now_millis;
+    use crate::dispatch::claim::Pending;
     use crate::dispatch::claim::{ClaimGuard, OutcomeSender};
     use crate::dispatch::message::{Claimed, Dispatch, SourceMeta};
+    use crate::dispatch::writer::{OUTCOME_BUDGET_BYTES, OutcomeBudget};
     use crate::gate::admission::GatingMode;
     use crate::gate::admission::quota::{QuotaGate, QuotaMode};
     use crate::gate::release::Releases;
@@ -610,7 +617,7 @@ mod tests {
         blobs: BlobStore,
         metrics: Arc<Metrics>,
         outcomes_tx: OutcomeSender,
-        outcomes: mpsc::UnboundedReceiver<Outcome>,
+        outcomes: mpsc::UnboundedReceiver<Pending>,
         _keep: Box<dyn Any + Send>,
     }
 
@@ -649,6 +656,7 @@ mod tests {
                 gate_wait_timeout: Duration::ZERO,
                 consume: CancellationToken::new(),
                 drain: CancellationToken::new(),
+                outcome_budget: OutcomeBudget::new(OUTCOME_BUDGET_BYTES),
             }
         }
 
@@ -710,9 +718,9 @@ mod tests {
         }
 
         fn outcome(&mut self) -> Outcome {
-            let outcome = self.outcomes.try_recv().expect("an outcome");
+            let pending = self.outcomes.try_recv().expect("an outcome");
             assert!(self.outcomes.try_recv().is_err(), "exactly one outcome");
-            outcome
+            pending.outcome
         }
 
         fn gate_decisions(&self, reason: &str) -> f64 {
@@ -1018,7 +1026,7 @@ mod tests {
         .unwrap();
         for _ in 0..3 {
             assert!(matches!(
-                rig.outcomes.try_recv(),
+                rig.outcomes.try_recv().map(|p| p.outcome),
                 Ok(Outcome::Release { .. })
             ));
         }
@@ -1093,5 +1101,46 @@ mod tests {
             due_ms - before
         );
         assert_eq!(gw.hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_result_waits_for_room_in_the_outcome_budget() {
+        let mut rig = Rig::embedded().await;
+        let body = format!(r#"{{"text":"{}"}}"#, "x".repeat(3000));
+        let gw = Gateway::replying(
+            StatusCode::OK,
+            &[("content-type", "application/json")],
+            &body,
+        )
+        .await;
+        let mut worker = rig.worker(None);
+        worker.outcome_budget = OutcomeBudget::new(4 * 1024);
+        let first = rig.dispatch("a", secs_from_now(60), &gw.url).await;
+        let second = rig.dispatch("b", secs_from_now(60), &gw.url).await;
+        process(&worker, first).await;
+        let held = rig.outcomes.try_recv().expect("the first outcome");
+        assert!(held.reserved.is_some(), "it holds its share of the budget");
+
+        let waiting = tokio::time::timeout(Duration::from_millis(300), worker.process(second));
+        assert!(
+            waiting.await.is_err(),
+            "no room while the first is unwritten"
+        );
+        assert_eq!(
+            gw.hits(),
+            2,
+            "the response arrived; only the handover waits"
+        );
+
+        let third = rig.dispatch("c", secs_from_now(60), &gw.url).await;
+        drop(held);
+        process(&worker, third).await;
+        let abandoned = rig.outcomes.try_recv().expect("the second's release");
+        assert!(
+            matches!(abandoned.outcome, Outcome::Release { .. }),
+            "a worker stopped while waiting returns its claim"
+        );
+        let written = rig.outcomes.try_recv().expect("the third outcome");
+        assert!(matches!(written.outcome, Outcome::Finish { .. }));
     }
 }

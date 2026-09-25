@@ -1,8 +1,16 @@
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::store::queue::{ClaimRef, Outcome};
 
-pub type OutcomeSender = UnboundedSender<Outcome>;
+/// An outcome on its way to the writer, holding the share of the outcome
+/// byte budget its result takes until it is written.
+pub struct Pending {
+    pub outcome: Outcome,
+    pub reserved: Option<OwnedSemaphorePermit>,
+}
+
+pub type OutcomeSender = UnboundedSender<Pending>;
 
 /// Ownership of one claimed request. Finish it with [`ClaimGuard::finish`];
 /// dropping it unfinished releases the request back to its queue.
@@ -23,9 +31,16 @@ impl ClaimGuard {
         self.claim.as_ref().map_or(0, |c| c.claim_id)
     }
 
-    pub fn finish(mut self, outcome: impl FnOnce(ClaimRef) -> Outcome) {
+    pub fn finish(
+        mut self,
+        reserved: Option<OwnedSemaphorePermit>,
+        outcome: impl FnOnce(ClaimRef) -> Outcome,
+    ) {
         if let Some(claim) = self.claim.take() {
-            let _ = self.outcomes.send(outcome(claim));
+            let _ = self.outcomes.send(Pending {
+                outcome: outcome(claim),
+                reserved,
+            });
         }
     }
 }
@@ -33,7 +48,10 @@ impl ClaimGuard {
 impl Drop for ClaimGuard {
     fn drop(&mut self) {
         if let Some(claim) = self.claim.take() {
-            let _ = self.outcomes.send(Outcome::Release { claim });
+            let _ = self.outcomes.send(Pending {
+                outcome: Outcome::Release { claim },
+                reserved: None,
+            });
         }
     }
 }
@@ -56,19 +74,21 @@ mod tests {
     fn dropping_releases() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         drop(ClaimGuard::new(claim(), tx));
-        assert!(matches!(rx.try_recv(), Ok(Outcome::Release { claim: c }) if c.claim_id == 7));
+        assert!(
+            matches!(rx.try_recv().map(|p| p.outcome), Ok(Outcome::Release { claim: c }) if c.claim_id == 7)
+        );
     }
 
     #[test]
     fn finishing_sends_exactly_one_outcome() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        ClaimGuard::new(claim(), tx).finish(|claim| Outcome::Retry {
+        ClaimGuard::new(claim(), tx).finish(None, |claim| Outcome::Retry {
             claim,
             envelope: crate::store::test_support::envelope("a", "b", "q", 1),
             due_ms: 5,
         });
         assert!(matches!(
-            rx.try_recv(),
+            rx.try_recv().map(|p| p.outcome),
             Ok(Outcome::Retry { due_ms: 5, .. })
         ));
         assert!(rx.try_recv().is_err());

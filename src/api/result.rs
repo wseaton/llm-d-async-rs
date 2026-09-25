@@ -100,6 +100,13 @@ impl ResultMessage {
         }
     }
 
+    pub fn http_text(req: &InternalRequest, status_code: u16, body: String) -> Self {
+        Self {
+            payload: body,
+            ..Self::http(req, status_code, b"")
+        }
+    }
+
     pub fn http_by_reference(req: &InternalRequest, status_code: u16, body: StoredBody) -> Self {
         Self {
             payload_ref: body.payload_ref,

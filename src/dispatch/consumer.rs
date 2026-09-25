@@ -252,6 +252,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::clock::now_millis;
+    use crate::dispatch::claim::Pending;
     use crate::dispatch::consumer::Consumer;
     use crate::dispatch::message::Claimed;
     use crate::gate::admission::GatingMode;
@@ -262,14 +263,13 @@ mod tests {
     use crate::gate::{SharedGate, Verdict};
     use crate::store::Store;
     use crate::store::embedded::test_support::{Fixture, open};
-    use crate::store::queue::Outcome;
     use crate::store::test_support::new_request;
     use crate::telemetry::metrics::{Metrics, QueueLabels};
 
     struct Rig {
         consumer: Consumer,
         claims: mpsc::Receiver<Claimed>,
-        _outcomes: mpsc::UnboundedReceiver<Outcome>,
+        _outcomes: mpsc::UnboundedReceiver<Pending>,
         _f: Fixture,
     }
 

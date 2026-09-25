@@ -87,8 +87,7 @@ impl std::fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 pub enum ResponseBody {
-    /// Valid UTF-8.
-    Inline(Bytes),
+    Inline(String),
     /// A binary body, in a result blob.
     Stored(StoredBody),
 }
@@ -217,19 +216,22 @@ impl InferenceClient {
                 dropped_reason,
             }));
         }
-        if std::str::from_utf8(&body).is_err() {
-            let stored = self
-                .write_body(body, &content_type, result_key)
-                .await
-                .map_err(store_failed)?;
-            return Ok(InferenceResponse {
-                status,
-                body: ResponseBody::Stored(stored),
-            });
-        }
+        let text = match String::from_utf8(Vec::from(body)) {
+            Ok(text) => text,
+            Err(e) => {
+                let stored = self
+                    .write_body(Bytes::from(e.into_bytes()), &content_type, result_key)
+                    .await
+                    .map_err(store_failed)?;
+                return Ok(InferenceResponse {
+                    status,
+                    body: ResponseBody::Stored(stored),
+                });
+            }
+        };
         Ok(InferenceResponse {
             status,
-            body: ResponseBody::Inline(body),
+            body: ResponseBody::Inline(text),
         })
     }
 

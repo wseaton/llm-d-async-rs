@@ -69,12 +69,13 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::config::merge_policy::Fairness;
+    use crate::dispatch::claim::Pending;
     use crate::dispatch::claim::{ClaimGuard, OutcomeSender};
     use crate::dispatch::message::{Claimed, Dispatch, SourceMeta};
     use crate::gate::release::Releases;
     use crate::merge::Source;
     use crate::merge::random_robin::run;
-    use crate::store::queue::{ClaimRef, Outcome};
+    use crate::store::queue::ClaimRef;
     use crate::store::test_support::envelope;
     use crate::telemetry::metrics::{Metrics, QueueLabels};
 
@@ -82,7 +83,7 @@ mod tests {
         control: mpsc::UnboundedSender<Source>,
         merged: mpsc::Receiver<Dispatch>,
         outcomes: OutcomeSender,
-        _outcomes_rx: mpsc::UnboundedReceiver<Outcome>,
+        _outcomes_rx: mpsc::UnboundedReceiver<Pending>,
         metrics: Arc<Metrics>,
         cancel: CancellationToken,
     }

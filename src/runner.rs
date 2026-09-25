@@ -229,6 +229,7 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
         &store,
         &inference,
         receivers,
+        &writer::OutcomeBudget::new(writer::OUTCOME_BUDGET_BYTES),
         &consume,
         &drain,
         &background,
@@ -293,6 +294,7 @@ async fn start(
     store: &Store,
     inference: &Arc<InferenceClient>,
     receivers: HashMap<String, merge::DispatchReceiver>,
+    outcome_budget: &writer::OutcomeBudget,
     consume: &CancellationToken,
     drain: &CancellationToken,
     background: &TaskTracker,
@@ -329,6 +331,7 @@ async fn start(
             gate_wait_timeout: cli.gate_wait_timeout,
             consume: consume.clone(),
             drain: drain.clone(),
+            outcome_budget: outcome_budget.clone(),
         });
         tracing::info!(pool = %pool.id, workers = pool.workers, "spawning workers");
         for _ in 0..pool.workers {
