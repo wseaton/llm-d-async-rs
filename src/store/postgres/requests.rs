@@ -775,7 +775,8 @@ mod tests {
     /// them. Each hot statement must read rows in proportion to its batch
     /// whatever the statistics say: no scan of the queue, no join that
     /// compares every key with every row. The queue is larger than
-    /// [`DISCARD_LIMIT`], so either shows up as discarded rows.
+    /// [`DISCARD_LIMIT`], so either shows up as discarded rows. Autovacuum
+    /// is off so that the statistics are the stale ones set up here.
     #[tokio::test]
     async fn hot_statements_stay_proportional_to_their_batch_under_stale_statistics() {
         let Some(url) = schema_url().await else {
@@ -786,7 +787,9 @@ mod tests {
         let mut client = db.pool.get().await.unwrap();
         client
             .batch_execute(&format!(
-                "INSERT INTO lda_partitions (queue, partition_id, owner, epoch, lease_expires_ms)
+                "ALTER TABLE lda_requests SET (autovacuum_enabled = false);
+                 ALTER TABLE lda_partitions SET (autovacuum_enabled = false);
+                 INSERT INTO lda_partitions (queue, partition_id, owner, epoch, lease_expires_ms)
                      SELECT 'q', g, 'me', 1, 9223372036854775807 FROM generate_series(0, {PARTITIONS} - 1) g;
                  INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope)
                      SELECT 'early' || g, 'early' || g, 'q', g, g, '{{}}' FROM generate_series(1, 7) g;
