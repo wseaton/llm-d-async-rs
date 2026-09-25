@@ -21,73 +21,101 @@ use crate::store::staging::StagedPayload;
 /// Largest number of rows one statement inserts.
 const INSERT_CHUNK: usize = 1000;
 
-/// Deletes the claims `(id, request_token, attempt)` of `$2..$4` that `$1`
-/// still holds under the epoch they were dispatched in. Each key is one
-/// probe of the unique index, and the delete goes straight to the rows found.
+/// Deletes the claims `(id, request_token, attempt)` of `$2..$4` that process
+/// `$1` still holds, with their inline bodies. Each key is one probe of the
+/// unique index, checked against the claim after the probe so no other index
+/// can serve it, and the delete goes straight to the rows found.
 pub(crate) const FINISH: &str = "
+    WITH gone AS (
     DELETE FROM lda_requests r
     WHERE r.ctid = ANY(ARRAY(
         SELECT x.tid
         FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt)
         CROSS JOIN LATERAL (
-            SELECT h.ctid AS tid FROM lda_requests h
-            JOIN lda_partitions p ON p.queue = h.queue AND p.partition_id = h.partition_id
+            SELECT h.ctid AS tid, h.claimed_by, h.dispatch_attempt FROM lda_requests h
             WHERE h.id = k.id AND h.request_token = k.request_token
-              AND h.dispatch_epoch <> 0 AND h.dispatch_attempt = k.attempt
-              AND p.owner = $1 AND p.epoch = h.dispatch_epoch
-        ) x))
-    RETURNING r.id, r.request_token, r.dispatch_attempt, r.payload IS NULL";
+            LIMIT 1
+        ) x
+        WHERE x.claimed_by = $1 AND x.dispatch_attempt = k.attempt))
+    RETURNING r.seq, r.id, r.request_token, r.dispatch_attempt, r.inline_payload
+    ), bodies AS (
+        DELETE FROM lda_payloads
+        WHERE seq = ANY(ARRAY(SELECT seq FROM gone WHERE inline_payload))
+    )
+    SELECT id, request_token, dispatch_attempt, NOT inline_payload FROM gone";
 
-/// Returns the claims of `$2..$4` that `$1` holds to their queue, due at `$5`
-/// with envelopes `$6`.
+/// Returns the claims of `$2..$4` that process `$1` holds to their queue, due
+/// at `$5` with envelopes `$6`.
 pub(crate) const RETRY: &str = "
     WITH m AS MATERIALIZED (
         SELECT x.tid, k.due, k.envelope
         FROM unnest($2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::text[])
              AS k(id, request_token, attempt, due, envelope)
         CROSS JOIN LATERAL (
-            SELECT h.ctid AS tid FROM lda_requests h
-            JOIN lda_partitions p ON p.queue = h.queue AND p.partition_id = h.partition_id
+            SELECT h.ctid AS tid, h.claimed_by, h.dispatch_attempt FROM lda_requests h
             WHERE h.id = k.id AND h.request_token = k.request_token
-              AND h.dispatch_epoch <> 0 AND h.dispatch_attempt = k.attempt
-              AND p.owner = $1
+            LIMIT 1
         ) x
+        WHERE x.claimed_by = $1 AND x.dispatch_attempt = k.attempt
     )
     UPDATE lda_requests r
-    SET dispatch_epoch = 0, not_before_ms = m.due, envelope = m.envelope
+    SET claimed_by = 0, not_before_ms = m.due, envelope = m.envelope
     FROM m
     WHERE r.ctid = ANY(ARRAY(SELECT tid FROM m)) AND r.ctid = m.tid";
 
-/// Returns the claims of `$2..$4` that `$1` holds to their queue unchanged.
+/// Returns the claims of `$2..$4` that process `$1` holds to their queue
+/// unchanged.
 pub(crate) const RELEASE: &str = "
-    UPDATE lda_requests r SET dispatch_epoch = 0
+    UPDATE lda_requests r SET claimed_by = 0
     WHERE r.ctid = ANY(ARRAY(
         SELECT x.tid
         FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt)
         CROSS JOIN LATERAL (
-            SELECT h.ctid AS tid FROM lda_requests h
-            JOIN lda_partitions p ON p.queue = h.queue AND p.partition_id = h.partition_id
+            SELECT h.ctid AS tid, h.claimed_by, h.dispatch_attempt FROM lda_requests h
             WHERE h.id = k.id AND h.request_token = k.request_token
-              AND h.dispatch_epoch <> 0 AND h.dispatch_attempt = k.attempt
-              AND p.owner = $1
-        ) x))";
+            LIMIT 1
+        ) x
+        WHERE x.claimed_by = $1 AND x.dispatch_attempt = k.attempt))";
 
-/// Claims the pending requests `$1` of queue `$2` in partitions `$3` holds
-/// and is not draining.
+/// Claims for process `$4` the pending requests `$1` of queue `$2` in
+/// partitions `$3` holds, with their inline bodies.
 pub(crate) const CLAIM: &str = concat!(
-    "UPDATE lda_requests r
-     SET dispatch_epoch = p.epoch,
+    "WITH claimed AS (
+     UPDATE lda_requests r
+     SET claimed_by = $4,
          dispatch_attempt = nextval('lda_dispatch_attempts')
      FROM lda_partitions p
-     WHERE r.seq = ANY($1) AND r.queue = $2 AND r.dispatch_epoch = 0
+     WHERE r.seq = ANY($1) AND r.queue = $2 AND r.claimed_by = 0
        AND p.queue = r.queue AND p.partition_id = r.partition_id
-       AND p.owner = $3 AND NOT p.draining
-       AND p.lease_expires_ms > ",
+       AND p.owner = $3 AND p.lease_expires_ms > ",
     db_now_ms!(),
     "
-     RETURNING r.seq, r.id, r.request_token, r.partition_id,
-               r.dispatch_epoch, r.dispatch_attempt, r.payload"
+     RETURNING r.seq, r.id, r.request_token, r.dispatch_attempt
+     )
+     SELECT c.seq, c.id, c.request_token, c.dispatch_attempt, b.data
+     FROM claimed c
+     LEFT JOIN (SELECT seq, data FROM lda_payloads WHERE seq = ANY($1)) b ON b.seq = c.seq"
 );
+
+/// Queues requests: `$1..$6` are their columns and `$7` their inline bodies,
+/// NULL for a body in a blob. Each request takes its `seq` from the identity
+/// sequence in array order, which its body is keyed by.
+pub(crate) const SUBMIT: &str = "
+    WITH t AS MATERIALIZED (
+        SELECT nextval('lda_requests_seq_seq') AS seq, r.*
+        FROM unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::bigint[],
+                    $6::text[], $7::bytea[])
+             AS r(id, request_token, queue, partition_id, deadline, envelope, payload)
+    ), bodies AS (
+        INSERT INTO lda_payloads (seq, data)
+        SELECT seq, payload FROM t WHERE payload IS NOT NULL
+    )
+    INSERT INTO lda_requests
+        (seq, id, request_token, queue, partition_id, deadline, envelope, inline_payload)
+    OVERRIDING SYSTEM VALUE
+    SELECT seq, id, request_token, queue, partition_id, deadline, envelope,
+           payload IS NOT NULL
+    FROM t";
 
 fn seq_of(key: PendingKey) -> i64 {
     i64::try_from(key.seq).unwrap_or(i64::MAX)
@@ -221,14 +249,7 @@ impl Inner {
                 }
             }
             txn.execute_cached(
-                "INSERT INTO lda_requests
-                    (id, request_token, queue, partition_id, deadline, envelope, payload)
-                 SELECT id, request_token, queue, partition_id, deadline, envelope, payload
-                 FROM unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::bigint[],
-                             $6::text[], $7::bytea[])
-                      WITH ORDINALITY AS t(id, request_token, queue, partition_id, deadline,
-                                           envelope, payload, ord)
-                 ORDER BY ord",
+                SUBMIT,
                 &[
                     &ids,
                     &tokens,
@@ -291,7 +312,7 @@ impl Inner {
         Ok(client
             .query_one_cached(
                 "SELECT EXISTS (SELECT 1 FROM lda_requests
-                                WHERE queue = $1 AND dispatch_epoch = 0 AND not_before_ms <= $2)",
+                                WHERE queue = $1 AND claimed_by = 0 AND not_before_ms <= $2)",
                 &[&queue, &now_ms],
             )
             .await?
@@ -369,7 +390,7 @@ impl Inner {
         let mut tracked = Vec::new();
         if !claims.is_empty() {
             let rows = txn
-                .query_cached(CLAIM, &[&claims, &queue, &self.owner])
+                .query_cached(CLAIM, &[&claims, &queue, &self.owner, &self.process()])
                 .await?;
             for row in rows {
                 let seq: i64 = row.get(0);
@@ -380,9 +401,7 @@ impl Inner {
                     queue: queue.to_owned(),
                     id: row.get(1),
                     token: row.get(2),
-                    partition: row.get(3),
-                    epoch: row.get(4),
-                    attempt: row.get(5),
+                    attempt: row.get(3),
                 };
                 if let Some(slot) = out.get_mut(i) {
                     *slot = Admitted::Claimed {
@@ -390,7 +409,7 @@ impl Inner {
                             generation: crate::api::request::generation_key(&t.id, &t.token),
                             claim_id: u64::try_from(t.attempt).unwrap_or(0),
                         },
-                        payload: row.get::<_, Option<Vec<u8>>>(6).map(Bytes::from),
+                        payload: row.get::<_, Option<Vec<u8>>>(4).map(Bytes::from),
                     };
                 }
                 tracked.push(t);
@@ -401,11 +420,17 @@ impl Inner {
             let seqs: Vec<i64> = removals.iter().map(|(_, s)| *s).collect();
             let rows = txn
                 .query_cached(
-                    "DELETE FROM lda_requests r USING lda_partitions p
-                     WHERE r.seq = ANY($1) AND r.queue = $2 AND r.dispatch_epoch = 0
-                       AND p.queue = r.queue AND p.partition_id = r.partition_id
-                       AND p.owner = $3
-                     RETURNING r.seq, r.request_token, r.payload IS NULL",
+                    "WITH gone AS (
+                        DELETE FROM lda_requests r USING lda_partitions p
+                        WHERE r.seq = ANY($1) AND r.queue = $2 AND r.claimed_by = 0
+                          AND p.queue = r.queue AND p.partition_id = r.partition_id
+                          AND p.owner = $3
+                        RETURNING r.seq, r.request_token, r.inline_payload
+                     ), bodies AS (
+                        DELETE FROM lda_payloads
+                        WHERE seq = ANY(ARRAY(SELECT seq FROM gone WHERE inline_payload))
+                     )
+                     SELECT seq, request_token, NOT inline_payload FROM gone",
                     &[&seqs, &queue, &self.owner],
                 )
                 .await?;
@@ -474,6 +499,7 @@ impl Inner {
             }
         }
 
+        let process = self.process();
         let mut client = self.pool.get().await?;
         let txn = client.transaction().await?;
         let mut dropped = Vec::new();
@@ -482,7 +508,7 @@ impl Inner {
             let tokens: Vec<&str> = finishes.iter().map(|f| f.1).collect();
             let attempts: Vec<i64> = finishes.iter().map(|f| f.2).collect();
             let rows = txn
-                .query_cached(FINISH, &[&self.owner, &ids, &tokens, &attempts])
+                .query_cached(FINISH, &[&process, &ids, &tokens, &attempts])
                 .await?;
             let mut done = HashSet::new();
             let mut blob_tokens = Vec::new();
@@ -519,7 +545,7 @@ impl Inner {
             let n = txn
                 .execute_cached(
                     RETRY,
-                    &[&self.owner, &ids, &tokens, &attempts, &due, &envelopes],
+                    &[&process, &ids, &tokens, &attempts, &due, &envelopes],
                 )
                 .await?;
             applied.fenced += retries
@@ -531,7 +557,7 @@ impl Inner {
             let tokens: Vec<&str> = releases.iter().map(|r| r.1).collect();
             let attempts: Vec<i64> = releases.iter().map(|r| r.2).collect();
             let n = txn
-                .execute_cached(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
+                .execute_cached(RELEASE, &[&process, &ids, &tokens, &attempts])
                 .await?;
             applied.fenced += releases
                 .len()
@@ -583,13 +609,13 @@ impl Inner {
                 let client = self.pool.get().await?;
                 let row = client
                     .query_opt_cached(
-                        "SELECT payload FROM lda_requests WHERE id = $1 AND request_token = $2",
+                        "SELECT b.data FROM lda_requests r
+                         JOIN lda_payloads b ON b.seq = r.seq
+                         WHERE r.id = $1 AND r.request_token = $2",
                         &[&envelope.request.id, &envelope.routing.request_token],
                     )
                     .await?;
-                Ok(row
-                    .and_then(|r| r.get::<_, Option<Vec<u8>>>(0))
-                    .map(|bytes| PayloadBody::Inline(Bytes::from(bytes))))
+                Ok(row.map(|r| PayloadBody::Inline(Bytes::from(r.get::<_, Vec<u8>>(0)))))
             }
             PayloadStorage::Blob => {
                 let Some(key) = BlobKey::request(&envelope.routing.request_token) else {
@@ -637,7 +663,7 @@ impl Inner {
             .query_one_cached(
                 "WITH base AS MATERIALIZED (
                     SELECT deadline FROM lda_requests
-                    WHERE queue = $1 AND dispatch_epoch = 0 AND not_before_ms <= $2
+                    WHERE queue = $1 AND claimed_by = 0 AND not_before_ms <= $2
                  )
                  SELECT (SELECT count(*) FROM base),
                         coalesce((SELECT array_agg(c ORDER BY i) FROM (
@@ -686,6 +712,7 @@ mod tests {
     use tokio_postgres::types::{FromSql, ToSql, Type};
 
     use crate::store::postgres::connect::Database;
+    use crate::store::postgres::partitions::RETURN_LAPSED;
     use crate::store::postgres::requests::{CLAIM, FINISH, RELEASE, RETRY};
     use crate::store::postgres::schema::migrate;
     use crate::store::postgres::test_support::schema_url;
@@ -714,8 +741,8 @@ mod tests {
         }
     }
 
-    /// What finding a statement's rows cost: shared buffers read (below the
-    /// write, for an insert, update or delete) and rows read then discarded
+    /// What finding a statement's rows cost: shared buffers read (not the
+    /// writes of an insert, update or delete) and rows read then discarded
     /// by a filter, join filter or index recheck.
     #[derive(Debug, Default)]
     struct Profile {
@@ -723,7 +750,17 @@ mod tests {
         discarded: f64,
     }
 
-    fn walk(node: &serde_json::Value, profile: &mut Profile, top: bool) {
+    fn blocks(node: &serde_json::Value) -> i64 {
+        node["Shared Hit Blocks"].as_i64().unwrap_or(0)
+            + node["Shared Read Blocks"].as_i64().unwrap_or(0)
+    }
+
+    /// Adds up what each node read itself, less its children, leaving out
+    /// the writes of every insert, update or delete. A CTE's reads are
+    /// counted under its own plan, not under the scans of it. A
+    /// data-modifying CTE nothing reads runs after the statement, outside
+    /// its parent's counts, so a parent never counts below zero.
+    fn walk(node: &serde_json::Value, profile: &mut Profile) {
         let loops = node["Actual Loops"].as_f64().unwrap_or(1.0);
         for key in [
             "Rows Removed by Filter",
@@ -733,17 +770,12 @@ mod tests {
             profile.discarded += node[key].as_f64().unwrap_or(0.0) * loops;
         }
         let children = node["Plans"].as_array().cloned().unwrap_or_default();
-        if top && node["Node Type"] == "ModifyTable" {
-            for child in &children {
-                profile.blocks += child["Shared Hit Blocks"].as_i64().unwrap_or(0)
-                    + child["Shared Read Blocks"].as_i64().unwrap_or(0);
-            }
-        } else if top {
-            profile.blocks = node["Shared Hit Blocks"].as_i64().unwrap_or(0)
-                + node["Shared Read Blocks"].as_i64().unwrap_or(0);
+        if !matches!(node["Node Type"].as_str(), Some("ModifyTable" | "CTE Scan")) {
+            let own = blocks(node) - children.iter().map(blocks).sum::<i64>();
+            profile.blocks += own.max(0);
         }
         for child in &children {
-            walk(child, profile, false);
+            walk(child, profile);
         }
     }
 
@@ -767,7 +799,7 @@ mod tests {
         txn.rollback().await.unwrap();
         let plan: serde_json::Value = serde_json::from_str(&row.get::<_, Json>(0).0).unwrap();
         let mut profile = Profile::default();
-        walk(&plan[0]["Plan"], &mut profile, true);
+        walk(&plan[0]["Plan"], &mut profile);
         profile
     }
 
@@ -788,15 +820,25 @@ mod tests {
         client
             .batch_execute(&format!(
                 "ALTER TABLE lda_requests SET (autovacuum_enabled = false);
+                 ALTER TABLE lda_payloads SET (autovacuum_enabled = false);
                  ALTER TABLE lda_partitions SET (autovacuum_enabled = false);
-                 INSERT INTO lda_partitions (queue, partition_id, owner, epoch, lease_expires_ms)
-                     SELECT 'q', g, 'me', 1, 9223372036854775807 FROM generate_series(0, {PARTITIONS} - 1) g;
-                 INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope)
-                     SELECT 'early' || g, 'early' || g, 'q', g, g, '{{}}' FROM generate_series(1, 7) g;
+                 INSERT INTO lda_partitions (queue, partition_id, owner, lease_expires_ms)
+                     SELECT 'q', g, 'me', 9223372036854775807 FROM generate_series(0, {PARTITIONS} - 1) g;
+                 INSERT INTO lda_processes (expires_ms) VALUES (9223372036854775807), (0);
+                 INSERT INTO lda_requests
+                     (id, request_token, queue, partition_id, deadline, envelope, inline_payload)
+                     SELECT 'early' || g, 'early' || g, 'q', g, g, '{{}}', true
+                     FROM generate_series(1, 7) g;
+                 INSERT INTO lda_payloads SELECT seq, '\\x00' FROM lda_requests;
                  ANALYZE lda_requests;
-                 INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope, payload)
-                     SELECT 'r' || g, 't' || g, 'q', g % {PARTITIONS}, g, '{{}}', convert_to(repeat('x', 512), 'UTF8')
-                     FROM generate_series(1, {ROWS}) g;"
+                 ANALYZE lda_payloads;
+                 INSERT INTO lda_requests
+                     (id, request_token, queue, partition_id, deadline, envelope, inline_payload)
+                     SELECT 'r' || g, 't' || g, 'q', g % {PARTITIONS}, g, '{{}}', true
+                     FROM generate_series(1, {ROWS}) g;
+                 INSERT INTO lda_payloads
+                     SELECT seq, convert_to(repeat('x', 512), 'UTF8') FROM lda_requests
+                     WHERE id LIKE 'r%';"
             ))
             .await
             .unwrap();
@@ -822,7 +864,8 @@ mod tests {
             .collect();
         let queue = "q";
         let owner = "me";
-        let claim = profile(&mut client, CLAIM, &[&seqs, &queue, &owner]).await;
+        let process = 1_i64;
+        let claim = profile(&mut client, CLAIM, &[&seqs, &queue, &owner, &process]).await;
         assert!(
             claim.discarded < DISCARD_LIMIT,
             "claim of {KEYS}: {claim:?}"
@@ -832,7 +875,7 @@ mod tests {
         client
             .batch_execute(
                 "ANALYZE lda_requests;
-                 UPDATE lda_requests SET dispatch_epoch = 1, dispatch_attempt = seq;",
+                 UPDATE lda_requests SET claimed_by = 1, dispatch_attempt = seq;",
             )
             .await
             .unwrap();
@@ -858,14 +901,14 @@ mod tests {
             (
                 "finish",
                 FINISH,
-                vec![&owner as &(dyn ToSql + Sync), &ids, &tokens, &attempts],
+                vec![&process as &(dyn ToSql + Sync), &ids, &tokens, &attempts],
             ),
             (
                 "retry",
                 RETRY,
-                vec![&owner, &ids, &tokens, &attempts, &due, &envelopes],
+                vec![&process, &ids, &tokens, &attempts, &due, &envelopes],
             ),
-            ("release", RELEASE, vec![&owner, &ids, &tokens, &attempts]),
+            ("release", RELEASE, vec![&process, &ids, &tokens, &attempts]),
         ] {
             let p = profile(&mut client, statement, &params).await;
             assert!(
@@ -877,5 +920,11 @@ mod tests {
                 "{name} of {KEYS} among {ROWS} in flight: {p:?}"
             );
         }
+
+        let lapsed = profile(&mut client, RETURN_LAPSED, &[]).await;
+        assert!(
+            lapsed.blocks < 100 && lapsed.discarded < 100.0,
+            "a lapsed process without claims among {ROWS} in flight: {lapsed:?}"
+        );
     }
 }

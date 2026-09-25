@@ -8,6 +8,11 @@ use crate::store::postgres::cached::Cached;
 use crate::store::postgres::{DB_NOW_MS, Inner};
 use crate::store::queue::{ACK_TOMBSTONE_TTL_MS, AckOutcome, ResultClaim};
 
+/// How many leases a lapsed process's row outlives its heartbeat. Its claims
+/// go back to pending on every heartbeat of a live process while the row
+/// lasts, which catches a claim it committed as it lapsed.
+const PROCESS_RETENTION_LEASES: i64 = 10;
+
 fn claim_id(seq: i64) -> u64 {
     u64::try_from(seq).unwrap_or(0)
 }
@@ -314,6 +319,20 @@ impl Inner {
             )
             .await?;
         let counters = sweep_counters(&txn).await?;
+        txn.execute_cached(
+            &format!(
+                "DELETE FROM lda_processes WHERE expires_ms < {DB_NOW_MS} - $1::bigint * {PROCESS_RETENTION_LEASES}"
+            ),
+            &[&self.lease_ttl_ms()],
+        )
+        .await?;
+        txn.execute_cached(
+            "UPDATE lda_requests r SET claimed_by = 0
+             WHERE r.claimed_by > 0
+               AND NOT EXISTS (SELECT 1 FROM lda_processes w WHERE w.id = r.claimed_by)",
+            &[],
+        )
+        .await?;
         txn.commit().await?;
         drop(client);
         let dropped: Vec<BlobKey> = blobs

@@ -61,17 +61,22 @@ its own directory and its own queues.
 **Postgres.** Each queue hashes its requests into 64 partitions. Every
 replica consuming a queue heartbeats a membership row and leases its share,
 `ceil(64 / live replicas)`, of the partitions; it only claims requests in
-partitions it holds. When a replica joins, the others drain partitions down
-to their new share (a draining partition takes no new work, and is released
-once its claims finish or `--partition-handoff-timeout` passes). When a
-replica dies, its leases lapse after `--partition-lease-ttl` and the
-survivors take its partitions and redeliver what it held.
+partitions it holds. When a replica joins, the others release partitions
+down to their new share at their next heartbeat, within a second.
 
-Every claim is fenced twice: by its partition lease and by an attempt number
-drawn for each dispatch. An outcome from a replica that lost its lease, or
-from an earlier dispatch of the same request, changes nothing. This is the
-design of the Go SQL transport (llm-d-async#452), including its reconcile of
-claims whose reply was lost.
+A claim belongs to the replica that made it, not to the partition: a
+partition handed over keeps its requests in flight with the replica that
+dispatched them, which finishes them while the new owner dispatches the
+rest, so a handoff never waits for a long generation. Each replica
+heartbeats a process row; when a replica dies, its row lapses after
+`--partition-lease-ttl`, its claims go back to pending, and the survivors
+take its partitions and redeliver what it held.
+
+Every claim is fenced by the replica that holds it and by an attempt number
+drawn for each dispatch. An outcome from a replica whose claims were
+returned, or from an earlier dispatch of the same request, changes nothing.
+Claims whose reply was lost are reconciled as in the Go SQL transport
+(llm-d-async#452).
 
 Quota gates (`quota`), leased-rate buckets (`leased-rate`), and budget keys
 count in the database, so limits hold across replicas. Concurrency slots are
@@ -109,8 +114,7 @@ were written. Set a lifecycle rule to abort incomplete multipart uploads.
 | `--database-url` / `DATABASE_URL` | | Postgres URL; TLS follows its `sslmode` |
 | `--database-max-connections` | 32 | per replica |
 | `--database-ca-cert` | | extra CA for Postgres (native TLS) |
-| `--partition-lease-ttl` | 30s | how long a dead replica's partitions and quota slots stay held |
-| `--partition-handoff-timeout` | 15m | longest a draining partition waits for its claims |
+| `--partition-lease-ttl` | 30s | how long a dead replica's partitions, claims and quota slots stay held |
 | `--blob-store` / `BLOB_STORE` | `local` (embedded) | required with Postgres; see [Blob stores](#stores-and-replicas) |
 | `--api-addr` | `0.0.0.0:8080` | producer/consumer API |
 | `--health-port` / `--metrics-port` | 8081 / 9090 | `/healthz`, `/readyz` / `/metrics` |

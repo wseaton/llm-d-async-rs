@@ -29,7 +29,6 @@ pub enum Backend {
         max_connections: usize,
         ca_cert: Option<PathBuf>,
         lease_ttl: Duration,
-        handoff_timeout: Duration,
     },
 }
 
@@ -139,7 +138,6 @@ impl StoreConfig {
                 max_connections,
                 ca_cert,
                 lease_ttl,
-                handoff_timeout,
             } => {
                 let db = Database::connect(url, *max_connections, ca_cert.as_deref()).await?;
                 let blobs = match &location {
@@ -154,7 +152,6 @@ impl StoreConfig {
                 };
                 let options = PostgresOptions {
                     lease_ttl: *lease_ttl,
-                    handoff_timeout: *handoff_timeout,
                     result_blob_retention: self.result_blob_retention,
                 };
                 let store = PgStore::open(db, blobs, &options, results).await?;
@@ -189,7 +186,6 @@ mod tests {
             max_connections: 1,
             ca_cert: None,
             lease_ttl: Duration::from_secs(30),
-            handoff_timeout: Duration::from_secs(60),
         }
     }
 

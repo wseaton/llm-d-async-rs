@@ -1,19 +1,19 @@
 //! Tables and functions of the Postgres store, created on first open.
 //!
 //! Queue tables churn their whole contents, so autovacuum runs on a fixed row
-//! count without cost throttling.
+//! count without cost throttling. Tables whose rows are updated in place keep
+//! free space on each page for the new versions.
 
 use deadpool_postgres::Pool;
 
 use crate::store::error::StoreError;
 
-const VERSION: i32 = 3;
+const VERSION: i32 = 4;
 
 /// Serializes concurrent migrations: "lda-mig" in ASCII.
 const MIGRATE_LOCK: i64 = 0x006c_6461_2d6d_6967;
 
-const CHURN: &str = "fillfactor = 70,
-    autovacuum_vacuum_scale_factor = 0,
+const CHURN: &str = "autovacuum_vacuum_scale_factor = 0,
     autovacuum_vacuum_threshold = 10000,
     autovacuum_vacuum_insert_scale_factor = 0,
     autovacuum_vacuum_insert_threshold = 10000,
@@ -24,37 +24,49 @@ fn ddl() -> Vec<String> {
     vec![
         format!(
             "CREATE TABLE IF NOT EXISTS lda_requests (
-                seq              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                seq              BIGINT GENERATED ALWAYS AS IDENTITY
+                                     (SEQUENCE NAME lda_requests_seq_seq) PRIMARY KEY,
                 id               TEXT     NOT NULL,
                 request_token    TEXT     NOT NULL,
                 queue            TEXT     NOT NULL,
                 partition_id     INTEGER  NOT NULL,
                 deadline         BIGINT   NOT NULL,
                 not_before_ms    BIGINT   NOT NULL DEFAULT 0,
-                dispatch_epoch   BIGINT   NOT NULL DEFAULT 0,
+                claimed_by       BIGINT   NOT NULL DEFAULT 0,
                 dispatch_attempt BIGINT   NOT NULL DEFAULT 0,
                 cancelled        BOOLEAN  NOT NULL DEFAULT false,
+                inline_payload   BOOLEAN  NOT NULL,
                 envelope         TEXT     NOT NULL,
-                payload          BYTEA,
                 UNIQUE (id, request_token)
+            ) WITH (fillfactor = 70, {CHURN})"
+        ),
+        format!(
+            "CREATE TABLE IF NOT EXISTS lda_payloads (
+                seq  BIGINT PRIMARY KEY,
+                data BYTEA  NOT NULL
             ) WITH ({CHURN})"
         ),
-        "CREATE INDEX IF NOT EXISTS lda_requests_pending
-            ON lda_requests (queue, deadline, seq) WHERE dispatch_epoch = 0"
-            .into(),
-        "CREATE INDEX IF NOT EXISTS lda_requests_inflight
-            ON lda_requests (queue, partition_id) WHERE dispatch_epoch > 0"
-            .into(),
         "CREATE TABLE IF NOT EXISTS lda_partitions (
             queue            TEXT    NOT NULL,
             partition_id     INTEGER NOT NULL,
             owner            TEXT    NOT NULL DEFAULT '',
-            epoch            BIGINT  NOT NULL DEFAULT 0,
-            draining         BOOLEAN NOT NULL DEFAULT false,
             lease_expires_ms BIGINT  NOT NULL DEFAULT 0,
             PRIMARY KEY (queue, partition_id)
         )"
         .into(),
+        "CREATE TABLE IF NOT EXISTS lda_processes (
+            id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            expires_ms BIGINT NOT NULL
+        )"
+        .into(),
+        MOVE_PAYLOADS.into(),
+        CLAIM_BY_PROCESS.into(),
+        "CREATE INDEX IF NOT EXISTS lda_requests_pending
+            ON lda_requests (queue, deadline, seq) WHERE claimed_by = 0"
+            .into(),
+        "CREATE INDEX IF NOT EXISTS lda_requests_claimed
+            ON lda_requests (claimed_by) WHERE claimed_by > 0"
+            .into(),
         "CREATE TABLE IF NOT EXISTS lda_dispatchers (
             queue      TEXT   NOT NULL,
             owner      TEXT   NOT NULL,
@@ -72,7 +84,7 @@ fn ddl() -> Vec<String> {
                 expires_at_ms  BIGINT,
                 lease_owner    TEXT,
                 lease_until_ms BIGINT NOT NULL DEFAULT 0
-            ) WITH ({CHURN})"
+            ) WITH (fillfactor = 70, {CHURN})"
         ),
         "CREATE INDEX IF NOT EXISTS lda_results_route ON lda_results (route, seq)".into(),
         "CREATE INDEX IF NOT EXISTS lda_results_expiry
@@ -154,8 +166,46 @@ fn ddl() -> Vec<String> {
     ]
 }
 
+/// Moves inline bodies out of request rows written by schema version 3, which
+/// kept them in `lda_requests.payload`.
+const MOVE_PAYLOADS: &str = "
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'lda_requests'
+          AND column_name = 'payload'
+    ) THEN
+        ALTER TABLE lda_requests ADD COLUMN inline_payload BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE lda_requests ALTER COLUMN inline_payload DROP DEFAULT;
+        UPDATE lda_requests SET inline_payload = true WHERE payload IS NOT NULL;
+        INSERT INTO lda_payloads (seq, data)
+            SELECT seq, payload FROM lda_requests WHERE payload IS NOT NULL;
+        ALTER TABLE lda_requests DROP COLUMN payload;
+    END IF;
+END $$";
+
+/// Moves claims from schema version 3, which stamped them with the epoch of
+/// their partition's lease, to the process that holds them. Version 3
+/// processes cannot finish their claims under the new schema, so every claim
+/// goes back to pending.
+const CLAIM_BY_PROCESS: &str = "
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'lda_requests'
+          AND column_name = 'dispatch_epoch'
+    ) THEN
+        ALTER TABLE lda_requests RENAME COLUMN dispatch_epoch TO claimed_by;
+        UPDATE lda_requests SET claimed_by = 0 WHERE claimed_by <> 0;
+        DROP INDEX IF EXISTS lda_requests_inflight;
+        ALTER TABLE lda_partitions DROP COLUMN IF EXISTS epoch, DROP COLUMN IF EXISTS draining;
+    END IF;
+END $$";
+
 /// The first `p_limit` requests of `p_queue` due by `p_now`, by deadline, in
-/// partitions `p_owner` holds and is not draining. It walks the pending index
+/// partitions `p_owner` holds. It walks the pending index
 /// in order and stops at the limit.
 const PEEK: &str = "
 CREATE OR REPLACE FUNCTION lda_peek(p_queue TEXT, p_owner TEXT, p_now BIGINT, p_limit BIGINT)
@@ -163,10 +213,10 @@ RETURNS TABLE (seq BIGINT, deadline BIGINT, envelope TEXT, cancelled BOOLEAN)
 LANGUAGE sql STABLE SET enable_seqscan = off SET enable_bitmapscan = off AS $$
     SELECT r.seq, r.deadline, r.envelope, r.cancelled
     FROM lda_requests r
-    WHERE r.queue = p_queue AND r.dispatch_epoch = 0 AND r.not_before_ms <= p_now
+    WHERE r.queue = p_queue AND r.claimed_by = 0 AND r.not_before_ms <= p_now
       AND r.partition_id = ANY(ARRAY(
           SELECT partition_id FROM lda_partitions
-          WHERE queue = p_queue AND owner = p_owner AND NOT draining))
+          WHERE queue = p_queue AND owner = p_owner))
     ORDER BY r.deadline, r.seq
     LIMIT p_limit
 $$";

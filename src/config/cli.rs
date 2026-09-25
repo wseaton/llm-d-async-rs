@@ -36,14 +36,10 @@ pub struct Cli {
     /// Extra CA certificate (PEM) for verifying Postgres.
     #[arg(long)]
     pub database_ca_cert: Option<PathBuf>,
-    /// How long a replica's queue partitions and quota slots outlive its last
-    /// heartbeat.
+    /// How long a replica's queue partitions, request claims and quota slots
+    /// outlive its last heartbeat.
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub partition_lease_ttl: Duration,
-    /// How long a partition handed to another replica waits for its
-    /// in-flight requests before it is released anyway.
-    #[arg(long, default_value = "15m", value_parser = parse_duration)]
-    pub partition_handoff_timeout: Duration,
     /// Where request bodies over --inline-payload-limit and binary results
     /// (audio, images) go. With --store postgres, an object store URL
     /// (`s3://bucket/prefix`, `gs://`, `az://`, `file://`) is required;
@@ -165,7 +161,6 @@ impl Cli {
                 max_connections: self.database_max_connections,
                 ca_cert: self.database_ca_cert.clone(),
                 lease_ttl: self.partition_lease_ttl,
-                handoff_timeout: self.partition_handoff_timeout,
             },
         };
         let config = StoreConfig {

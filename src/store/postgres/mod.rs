@@ -1,10 +1,9 @@
 //! Durable queue state in Postgres, shared by any number of replicas.
 //!
 //! Replicas split each queue by leasing partitions (see [`partitions`]). A
-//! claim is fenced twice: by the partition lease its row was stamped under,
-//! and by an attempt number drawn fresh for every dispatch, so an outcome
-//! from a replica that lost its lease, or from an older dispatch, changes
-//! nothing. Admission counters live here too (see [`counters`]), so quota
+//! claim is held by the process that made it and fenced by an attempt number
+//! drawn fresh for every dispatch, so an outcome from a process whose claims
+//! were returned, or from an older dispatch, changes nothing. Admission counters live here too (see [`counters`]), so quota
 //! limits hold across replicas.
 
 /// The database's clock in Unix milliseconds, as SQL, for `concat!`.
@@ -27,6 +26,7 @@ mod schema;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -59,11 +59,9 @@ pub(crate) const RESULTS_CHANNEL: &str = "lda_results";
 
 #[derive(Debug, Clone)]
 pub struct PostgresOptions {
-    /// How long a partition lease or quota holder lasts without a heartbeat.
+    /// How long a partition lease, a process's claims, or a quota holder
+    /// last without a heartbeat.
     pub lease_ttl: Duration,
-    /// How long a partition handed to another replica waits for its claims
-    /// to finish before it is released anyway.
-    pub handoff_timeout: Duration,
     pub result_blob_retention: Duration,
 }
 
@@ -74,8 +72,9 @@ pub(crate) struct Inner {
     blobs: BlobStore,
     /// This process's name in leases.
     owner: String,
+    /// This process's row in `lda_processes`, which its claims name.
+    process: AtomicI64,
     lease_ttl: Duration,
-    handoff_timeout: Duration,
     result_blob_retention_ms: i64,
     state: Mutex<State>,
     /// Wakes the balancer when a queue is joined or left.
@@ -105,13 +104,15 @@ impl PgStore {
         let stop = CancellationToken::new();
         let tasks = TaskTracker::new();
         let owner = format!("{:032x}", rand::random::<u128>());
+        let ttl_ms = i64::try_from(options.lease_ttl.as_millis()).unwrap_or(i64::MAX);
+        let process = partitions::register(&db.control.get().await?, ttl_ms).await?;
         let inner = Arc::new(Inner {
             pool: db.pool.clone(),
             control: db.control.clone(),
             blobs,
             owner,
+            process: AtomicI64::new(process),
             lease_ttl: options.lease_ttl,
-            handoff_timeout: options.handoff_timeout,
             result_blob_retention_ms: i64::try_from(options.result_blob_retention.as_millis())
                 .unwrap_or(i64::MAX),
             state: Mutex::new(State::default()),
@@ -122,7 +123,7 @@ impl PgStore {
         tasks.spawn(balance(Arc::clone(&inner), stop.clone()));
         tasks.spawn(listen::run(db.clone(), results, stop.clone()));
         let counters = PgCounters::start(db.pool.clone(), options.lease_ttl);
-        tracing::info!(owner = %inner.owner, "postgres store opened");
+        tracing::info!(owner = %inner.owner, process, "postgres store opened");
         Ok(Self {
             inner,
             counters,
@@ -141,10 +142,11 @@ impl PgStore {
     }
 }
 
-/// Heartbeats every queue this process takes part in, a third of a lease
-/// apart, and at once when a queue is joined or left.
+/// Heartbeats this process and every queue it takes part in, a third of a
+/// lease apart and at least once a second, and at once when a queue is
+/// joined or left.
 async fn balance(inner: Arc<Inner>, stop: CancellationToken) {
-    let period = (inner.lease_ttl / 3).max(Duration::from_millis(100));
+    let period = (inner.lease_ttl / 3).clamp(Duration::from_millis(100), Duration::from_secs(1));
     let mut ticker = tokio::time::interval(period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -153,6 +155,9 @@ async fn balance(inner: Arc<Inner>, stop: CancellationToken) {
             () = stop.cancelled() => return,
             _ = ticker.tick() => {}
             () = inner.wake.notified() => {}
+        }
+        if let Err(e) = inner.beat().await {
+            tracing::warn!(error = %e, "process heartbeat failed");
         }
         let mut beats = tokio::task::JoinSet::new();
         for queue in inner.queue_names() {
@@ -346,6 +351,10 @@ impl QueueStore for PgStore {
                     first_error.get_or_insert(e);
                 }
             }
+            if let Err(e) = self.inner.retire().await {
+                tracing::warn!(error = %e, "failed to return this process's claims");
+                first_error.get_or_insert(e);
+            }
             first_error.map_or(Ok(()), Err)
         })
     }
@@ -488,6 +497,7 @@ mod tests {
         b.store.join(QUEUE).await.unwrap();
         let mut recovered = Vec::new();
         for _ in 0..50 {
+            b.pg.inner.beat().await.unwrap();
             b.pg.inner.rebalance(QUEUE).await.unwrap();
             recovered.extend(claim_all(&b.store, 20).await);
             if recovered.len() == 20 {
@@ -555,30 +565,215 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leaving_drains_partitions_that_still_hold_claims() {
+    async fn joining_splits_partitions_at_once_while_claims_are_in_flight() {
+        let Some((a, b)) = pair(Duration::from_secs(30)).await else {
+            return;
+        };
+        a.store.join(QUEUE).await.unwrap();
+        submit(&a.store, 100).await;
+        assert_eq!(claim_all(&a.store, 100).await.len(), 100);
+        b.store.join(QUEUE).await.unwrap();
+        a.pg.inner.rebalance(QUEUE).await.unwrap();
+        b.pg.inner.rebalance(QUEUE).await.unwrap();
+        let half = i64::from(PARTITIONS / 2);
+        assert_eq!(
+            owners(&a).await,
+            HashMap::from([
+                (a.pg.owner().to_owned(), half),
+                (b.pg.owner().to_owned(), half)
+            ]),
+            "the split does not wait for claims"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_handoff_leaves_claims_with_their_process() {
+        let Some((a, b)) = pair(Duration::from_secs(30)).await else {
+            return;
+        };
+        a.store.join(QUEUE).await.unwrap();
+        submit(&a.store, 10).await;
+        let (peeked, claim) = claim_all(&a.store, 1).await.remove(0);
+        b.store.join(QUEUE).await.unwrap();
+        a.store.leave(QUEUE);
+        a.pg.inner.rebalance(QUEUE).await.unwrap();
+        b.pg.inner.rebalance(QUEUE).await.unwrap();
+        assert_eq!(
+            owners(&b).await,
+            HashMap::from([(b.pg.owner().to_owned(), i64::from(PARTITIONS))]),
+            "the leaver hands every partition over with a claim in flight"
+        );
+        assert!(
+            a.pg.inner.queue_names().contains(&QUEUE.to_owned()),
+            "the leaver stays until its claim ends"
+        );
+
+        let taken = claim_all(&b.store, 10).await;
+        assert_eq!(
+            taken.len(),
+            9,
+            "the new owner takes the rest, not the claim"
+        );
+        assert!(taken.iter().all(|(p, _)| p.key != peeked.key));
+
+        let env = peeked.envelope.unwrap();
+        let applied = a
+            .store
+            .apply_outcomes(
+                vec![Outcome::Finish {
+                    claim,
+                    result: ResultMessage::http(&env, 200, b"{}"),
+                    envelope: env,
+                }]
+                .into(),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.results_written, 1, "the leaver finishes its claim");
+        a.pg.inner.rebalance(QUEUE).await.unwrap();
+        assert!(a.pg.inner.queue_names().is_empty());
+        assert!(claim_all(&b.store, 10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_process_that_claims_as_it_lapses_is_returned_again() {
+        let Some((a, b)) = pair(SHORT_TTL).await else {
+            return;
+        };
+        a.store.join(QUEUE).await.unwrap();
+        submit(&a.store, 2).await;
+        let first = claim_all(&a.store, 1).await;
+        a.pg.stop.cancel();
+        a.pg.tasks.close();
+        a.pg.tasks.wait().await;
+        tokio::time::sleep(SHORT_TTL + Duration::from_millis(200)).await;
+        b.pg.inner.beat().await.unwrap();
+        assert_eq!(pending_ids(&b).await.len(), 2);
+
+        // A claim that commits after its process lapsed, as a slow statement
+        // would, is returned by the next heartbeat.
+        b.db.pool
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                "UPDATE lda_requests SET claimed_by = $1, dispatch_attempt = nextval('lda_dispatch_attempts')",
+                &[&a.pg.inner.process()],
+            )
+            .await
+            .unwrap();
+        b.pg.inner.beat().await.unwrap();
+        assert_eq!(pending_ids(&b).await.len(), 2);
+        assert_eq!(first.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sweeping_forgets_lapsed_processes_and_returns_their_claims() {
+        let Some(f) = crate::store::postgres::test_support::fixture().await else {
+            return;
+        };
+        f.store.join(QUEUE).await.unwrap();
+        submit(&f.store, 1).await;
+        let client = f.db.pool.get().await.unwrap();
+        client
+            .batch_execute(
+                "INSERT INTO lda_processes (expires_ms) VALUES (0);
+                 UPDATE lda_requests SET claimed_by = 9223372036854775807;",
+            )
+            .await
+            .unwrap();
+        f.store.sweep(NOW_MS).await.unwrap();
+        let processes: i64 = client
+            .query_one("SELECT count(*) FROM lda_processes", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(processes, 1, "only the live process is left");
+        assert_eq!(
+            pending_ids(&f).await,
+            ["r000"],
+            "a claim naming no process is returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_process_forgotten_by_the_sweep_registers_again_and_drops_its_claims() {
+        let Some(f) = crate::store::postgres::test_support::fixture().await else {
+            return;
+        };
+        f.store.join(QUEUE).await.unwrap();
+        submit(&f.store, 1).await;
+        let (peeked, claim) = claim_all(&f.store, 1).await.remove(0);
+        let old = f.pg.inner.process();
+        f.db.pool
+            .get()
+            .await
+            .unwrap()
+            .execute("DELETE FROM lda_processes WHERE id = $1", &[&old])
+            .await
+            .unwrap();
+        f.store.sweep(NOW_MS).await.unwrap();
+        f.pg.inner.beat().await.unwrap();
+        assert_ne!(f.pg.inner.process(), old);
+        assert!(f.pg.inner.state.lock().unwrap().claims.is_empty());
+        let env = peeked.envelope.unwrap();
+        let applied = f
+            .store
+            .apply_outcomes(
+                vec![Outcome::Finish {
+                    claim,
+                    result: ResultMessage::http(&env, 200, b"{}"),
+                    envelope: env,
+                }]
+                .into(),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.fenced, 1, "the old process's outcome is fenced");
+        assert_eq!(claim_all(&f.store, 1).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn closing_returns_the_claims_left_and_removes_the_process() {
         let Some((a, b)) = pair(Duration::from_secs(30)).await else {
             return;
         };
         a.store.join(QUEUE).await.unwrap();
         submit(&a.store, 1).await;
-        let (_, claim) = claim_all(&a.store, 1).await.remove(0);
-        b.store.join(QUEUE).await.unwrap();
-        a.store.leave(QUEUE);
-        a.pg.inner.rebalance(QUEUE).await.unwrap();
-        b.pg.inner.rebalance(QUEUE).await.unwrap();
-        let held_by_a = owners(&a).await.get(a.pg.owner()).copied();
-        assert_eq!(held_by_a, Some(1), "the partition with a claim drains");
-        a.store
-            .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
+        assert_eq!(claim_all(&a.store, 1).await.len(), 1);
+        a.store.close().await.unwrap();
+        assert_eq!(pending_ids(&b).await, ["r000"]);
+        let alive: bool =
+            b.db.pool
+                .get()
+                .await
+                .unwrap()
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM lda_processes WHERE id = $1)",
+                    &[&a.pg.inner.process()],
+                )
+                .await
+                .unwrap()
+                .get(0);
+        assert!(!alive);
+    }
+
+    async fn pending_ids(f: &Fixture) -> Vec<String> {
+        f.db.pool
+            .get()
             .await
-            .unwrap();
-        a.pg.inner.rebalance(QUEUE).await.unwrap();
-        b.pg.inner.rebalance(QUEUE).await.unwrap();
-        assert_eq!(
-            owners(&b).await,
-            HashMap::from([(b.pg.owner().to_owned(), i64::from(PARTITIONS))])
-        );
-        assert_eq!(claim_all(&b.store, 10).await.len(), 1);
+            .unwrap()
+            .query(
+                "SELECT id FROM lda_requests WHERE claimed_by = 0 ORDER BY id",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
     }
 
     #[tokio::test]
@@ -593,11 +788,9 @@ mod tests {
             .await
             .unwrap()
             .execute(
-                "UPDATE lda_requests r SET dispatch_epoch = p.epoch,
-                     dispatch_attempt = nextval('lda_dispatch_attempts')
-                 FROM lda_partitions p
-                 WHERE p.queue = r.queue AND p.partition_id = r.partition_id",
-                &[],
+                "UPDATE lda_requests
+                 SET claimed_by = $1, dispatch_attempt = nextval('lda_dispatch_attempts')",
+                &[&f.pg.inner.process()],
             )
             .await
             .unwrap();
@@ -842,11 +1035,9 @@ mod tests {
             .await
             .unwrap()
             .execute(
-                "UPDATE lda_requests r SET dispatch_epoch = p.epoch,
-                     dispatch_attempt = nextval('lda_dispatch_attempts')
-                 FROM lda_partitions p
-                 WHERE p.queue = r.queue AND p.partition_id = r.partition_id",
-                &[],
+                "UPDATE lda_requests
+                 SET claimed_by = $1, dispatch_attempt = nextval('lda_dispatch_attempts')",
+                &[&f.pg.inner.process()],
             )
             .await
             .unwrap();
@@ -937,5 +1128,235 @@ mod tests {
         for open in opens {
             open.await.unwrap();
         }
+    }
+
+    async fn body_rows(f: &Fixture) -> Vec<String> {
+        f.db.pool
+            .get()
+            .await
+            .unwrap()
+            .query(
+                "SELECT r.id FROM lda_payloads b LEFT JOIN lda_requests r ON r.seq = b.seq
+                 ORDER BY r.id",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<_, Option<String>>(0).unwrap_or_default())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn inline_bodies_leave_with_their_requests() {
+        let Some(f) = crate::store::postgres::test_support::fixture().await else {
+            return;
+        };
+        f.store.join(QUEUE).await.unwrap();
+        submit(&f.store, 4).await;
+        let mut sink =
+            crate::store::staging::PayloadSink::new(f.store.blobs().clone(), "0a", 4, 1 << 20);
+        sink.push(b"0123456789").await.unwrap();
+        let payload = sink.finish().await.unwrap();
+        let mut blob = new_request("blob", QUEUE, 20_000);
+        blob.envelope.routing.request_token = "0a".into();
+        blob.envelope.payload = payload.info("audio/wav");
+        blob.payload = payload;
+        f.store.submit(vec![blob]).await.unwrap();
+        assert_eq!(body_rows(&f).await, ["r000", "r001", "r002", "r003"]);
+
+        let peeked = f.store.peek(QUEUE.into(), 10, NOW_MS).await.unwrap();
+        let env = |i: usize| Box::new(peeked[i].envelope.clone().unwrap());
+        let admissions = vec![
+            Admission::Claim {
+                key: peeked[0].key,
+                generation: env(0).generation_key(),
+            },
+            Admission::Claim {
+                key: peeked[1].key,
+                generation: env(1).generation_key(),
+            },
+            Admission::Finish {
+                key: peeked[2].key,
+                result: Box::new(ResultMessage::http(&env(2), 200, b"{}")),
+                envelope: env(2),
+            },
+            Admission::Discard { key: peeked[3].key },
+        ];
+        let admitted = f
+            .store
+            .admit(QUEUE.into(), admissions, NOW_MS)
+            .await
+            .unwrap();
+        let mut claims = Vec::new();
+        for (a, want) in admitted.into_iter().zip(["r000", "r001"]) {
+            let Admitted::Claimed { claim, payload } = a else {
+                panic!("{want} was not claimed: {a:?}");
+            };
+            assert_eq!(
+                payload.as_deref(),
+                Some(format!(r#"{{"prompt":"{want}"}}"#).as_bytes())
+            );
+            claims.push(claim);
+        }
+        assert_eq!(body_rows(&f).await, ["r000", "r001"]);
+
+        let retried = *env(1);
+        let applied = f
+            .store
+            .apply_outcomes(
+                vec![
+                    Outcome::Finish {
+                        claim: claims.remove(0),
+                        result: ResultMessage::http(&env(0), 200, b"{}"),
+                        envelope: *env(0),
+                    },
+                    Outcome::Retry {
+                        claim: claims.remove(0),
+                        envelope: retried.clone(),
+                        due_ms: NOW_MS,
+                    },
+                ]
+                .into(),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.results_written, 1);
+        assert_eq!(body_rows(&f).await, ["r001"], "a retry keeps its body");
+        match f.store.open_payload(&retried).await.unwrap() {
+            Some(crate::store::queue::PayloadBody::Inline(b)) => {
+                assert_eq!(&b[..], br#"{"prompt":"r001"}"#)
+            }
+            _ => panic!("the retried body is not inline"),
+        }
+
+        let (peeked, claim) = claim_all(&f.store, 10)
+            .await
+            .into_iter()
+            .find(|(p, _)| p.envelope.as_ref().unwrap().request.id == "blob")
+            .unwrap();
+        let env = peeked.envelope.unwrap();
+        f.store
+            .apply_outcomes(
+                vec![Outcome::Finish {
+                    claim,
+                    result: ResultMessage::http(&env, 200, b"{}"),
+                    envelope: env,
+                }]
+                .into(),
+                NOW_MS,
+            )
+            .await
+            .unwrap();
+        let key = crate::store::blob::key::BlobKey::request("0a").unwrap();
+        assert!(f.store.blobs().open(&key).await.unwrap().is_none());
+        assert_eq!(body_rows(&f).await, ["r001"]);
+    }
+
+    #[tokio::test]
+    async fn migration_moves_version_3_bodies_and_claims() {
+        let Some(url) = schema_url().await else {
+            return;
+        };
+        let db = crate::store::postgres::connect::Database::connect(&url, 1, None)
+            .await
+            .unwrap();
+        let inline = new_request("a", QUEUE, 10_000);
+        let bodiless = new_request("b", QUEUE, 10_001);
+        let envelopes = [
+            serde_json::to_string(&inline.envelope).unwrap(),
+            serde_json::to_string(&bodiless.envelope).unwrap(),
+        ];
+        db.pool
+            .get()
+            .await
+            .unwrap()
+            .batch_execute(
+                "CREATE TABLE lda_requests (
+                    seq              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                    id               TEXT     NOT NULL,
+                    request_token    TEXT     NOT NULL,
+                    queue            TEXT     NOT NULL,
+                    partition_id     INTEGER  NOT NULL,
+                    deadline         BIGINT   NOT NULL,
+                    not_before_ms    BIGINT   NOT NULL DEFAULT 0,
+                    dispatch_epoch   BIGINT   NOT NULL DEFAULT 0,
+                    dispatch_attempt BIGINT   NOT NULL DEFAULT 0,
+                    cancelled        BOOLEAN  NOT NULL DEFAULT false,
+                    envelope         TEXT     NOT NULL,
+                    payload          BYTEA,
+                    UNIQUE (id, request_token)
+                 );
+                 CREATE TABLE lda_partitions (
+                    queue            TEXT    NOT NULL,
+                    partition_id     INTEGER NOT NULL,
+                    owner            TEXT    NOT NULL DEFAULT '',
+                    epoch            BIGINT  NOT NULL DEFAULT 0,
+                    draining         BOOLEAN NOT NULL DEFAULT false,
+                    lease_expires_ms BIGINT  NOT NULL DEFAULT 0,
+                    PRIMARY KEY (queue, partition_id)
+                 );
+                 INSERT INTO lda_partitions VALUES ('q', 0, 'gone', 4, true, 0);
+                 CREATE TABLE lda_schema (version INTEGER NOT NULL);
+                 INSERT INTO lda_schema VALUES (3);",
+            )
+            .await
+            .unwrap();
+        db.pool
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO lda_requests
+                     (id, request_token, queue, partition_id, deadline, envelope, payload,
+                      dispatch_epoch)
+                 VALUES ('a', $1, 'q', 0, 10000, $2, 'body', 4),
+                        ('b', $3, 'q', 0, 10001, $4, NULL, 0)",
+                &[
+                    &inline.envelope.routing.request_token,
+                    &envelopes[0],
+                    &bodiless.envelope.routing.request_token,
+                    &envelopes[1],
+                ],
+            )
+            .await
+            .unwrap();
+
+        let f = replica(&url, chunk_blobs, Duration::from_secs(30)).await;
+        let client = f.db.pool.get().await.unwrap();
+        let flags: Vec<(String, bool, i64)> = client
+            .query(
+                "SELECT id, inline_payload, claimed_by FROM lda_requests ORDER BY id",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        assert_eq!(
+            flags,
+            [("a".into(), true, 0), ("b".into(), false, 0)],
+            "a version 3 claim goes back to pending"
+        );
+        let dropped: i64 = client
+            .query_one(
+                "SELECT count(*) FROM information_schema.columns
+                 WHERE table_schema = current_schema() AND table_name = 'lda_partitions'
+                   AND column_name IN ('epoch', 'draining')",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(dropped, 0);
+        assert_eq!(body_rows(&f).await, ["a"]);
+        match f.store.open_payload(&inline.envelope).await.unwrap() {
+            Some(crate::store::queue::PayloadBody::Inline(b)) => assert_eq!(&b[..], b"body"),
+            _ => panic!("the migrated body is not inline"),
+        }
+        submit(&f.store, 1).await;
+        assert_eq!(body_rows(&f).await, ["a", "r000"]);
     }
 }

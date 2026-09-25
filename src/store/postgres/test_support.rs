@@ -50,7 +50,6 @@ pub async fn schema_url() -> Option<String> {
 pub fn options(lease_ttl: Duration) -> PostgresOptions {
     PostgresOptions {
         lease_ttl,
-        handoff_timeout: Duration::from_secs(5),
         result_blob_retention: Duration::from_secs(3600),
     }
 }
