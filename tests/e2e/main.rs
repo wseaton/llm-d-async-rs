@@ -3,5 +3,6 @@
 mod delivery;
 mod flow_control;
 mod harness;
+mod health;
 mod lifecycle;
 mod replicas;

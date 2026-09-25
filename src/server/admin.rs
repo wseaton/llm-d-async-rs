@@ -66,7 +66,7 @@ pub async fn get_dispatch_rate(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<DispatchRateLimit>, ApiError> {
-    match state.store.dispatch_rate(&key).await? {
+    match state.store.dispatch_rate(&key).await?.value {
         Some(Ok(limit)) => Ok(Json(limit)),
         Some(Err(e)) => Err(ApiError::Internal(format!(
             "stored command is corrupt: {e}"

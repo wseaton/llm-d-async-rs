@@ -29,7 +29,6 @@ use tokio_util::task::TaskTracker;
 
 use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
-use crate::store::QueueStore;
 use crate::store::blob::key::BlobKey;
 use crate::store::blob::{BlobBody, BlobStore};
 use crate::store::error::StoreError;
@@ -41,6 +40,7 @@ use crate::store::queue::{
     AckOutcome, Admission, Admitted, Applied, Backlog, NewRequest, Outcome, PayloadBody, Peeked,
     ResultClaim,
 };
+use crate::store::{QueueStore, Stamped};
 
 /// The database clock, which every replica times leases by.
 pub(crate) const DB_NOW_MS: &str = "(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
@@ -308,7 +308,7 @@ impl QueueStore for PgStore {
         Box::pin(self.inner.result_depth(route, now_ms))
     }
 
-    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Option<Vec<u8>>, StoreError>> {
+    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Stamped<Option<Vec<u8>>>, StoreError>> {
         Box::pin(self.inner.kv_get(key))
     }
 

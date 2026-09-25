@@ -126,13 +126,17 @@ type Submitted struct {
 }
 
 // Result is a result as the processor sends it. When PayloadRef is set, the
-// body was not JSON and is read with OpenResultBody; Payload is empty.
+// body was binary and is read with OpenResultBody; Payload is empty.
+// PayloadLocation is then the body's URL in the object store holding it, if
+// it is in one, for readers that can copy it there directly.
 type Result struct {
 	api.ResultMessage
-	PayloadRef    string `json:"payload_ref,omitempty"`
-	ContentType   string `json:"content_type,omitempty"`
-	PayloadSize   int64  `json:"payload_size,omitempty"`
-	PayloadSHA256 string `json:"payload_sha256,omitempty"`
+	PayloadRef      string `json:"payload_ref,omitempty"`
+	PayloadLocation string `json:"payload_location,omitempty"`
+	ContentType     string `json:"content_type,omitempty"`
+	PayloadSize     int64  `json:"payload_size,omitempty"`
+	PayloadSHA256   string `json:"payload_sha256,omitempty"`
+	RequestToken    string `json:"request_token,omitempty"`
 }
 
 // Delivery is a leased result. It stays stored until AckResult; if the lease

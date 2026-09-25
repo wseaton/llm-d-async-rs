@@ -1,7 +1,7 @@
 use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{Gate, SharedGate, Verdict, apply_chain};
+use crate::gate::{Gate, GateError, SharedGate, Verdict, apply_chain};
 
 /// All inner gates must admit; the budget is the smallest inner budget.
 pub struct CompositeGate {
@@ -29,7 +29,7 @@ impl Gate for CompositeGate {
         &'a self,
         msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
         Box::pin(apply_chain(&self.gates, msg, releases))
     }
 }
@@ -61,7 +61,10 @@ mod tests {
             Arc::new(FixedGate::new(1.0, Verdict::Refuse)),
         ]);
         let mut r = Releases::default();
-        assert_eq!(g.apply(&mut request(&[]), &mut r).await, Verdict::Wait);
+        assert_eq!(
+            g.apply(&mut request(&[]), &mut r).await.unwrap(),
+            Verdict::Wait
+        );
         assert!(r.is_empty());
     }
 }

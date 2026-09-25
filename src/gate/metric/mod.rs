@@ -8,7 +8,7 @@ use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
 use crate::gate::metric::source::MetricSource;
 use crate::gate::release::Releases;
-use crate::gate::{Gate, Verdict, budget_verdict};
+use crate::gate::{Gate, GateError, Verdict, budget_verdict};
 use crate::telemetry::metrics::{Metrics, QueueLabels};
 
 /// Reads a budget D from its source and returns D − threshold clamped to
@@ -110,8 +110,8 @@ impl Gate for MetricGate {
         &'a self,
         _msg: &'a mut InternalRequest,
         _releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
-        Box::pin(async move { budget_verdict(self.budget().await) })
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
+        Box::pin(async move { Ok(budget_verdict(self.budget().await)) })
     }
 }
 

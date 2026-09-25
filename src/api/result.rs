@@ -19,8 +19,10 @@ pub enum ErrorCode {
 ///
 /// `status_code > 0` means an HTTP response was received. `payload` is its
 /// body, or, when `payload_ref` is set, `payload` is empty and the body is the
-/// blob `payload_ref` names. `status_code == 0` means no response;
-/// `error_code` says why.
+/// blob `payload_ref` names, readable through the processor's API. When that
+/// blob sits in an object store, `payload_location` is its URL there, for
+/// consumers that can copy it without a round trip through the processor.
+/// `status_code == 0` means no response; `error_code` says why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultMessage {
     pub id: String,
@@ -33,6 +35,8 @@ pub struct ResultMessage {
     pub error_message: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub payload_ref: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub payload_location: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_type: String,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
@@ -47,6 +51,8 @@ pub struct ResultMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredBody {
     pub payload_ref: String,
+    /// The blob's URL in the object store holding it, if it is in one.
+    pub location: Option<String>,
     pub content_type: String,
     pub size: u64,
     pub sha256: String,
@@ -70,6 +76,7 @@ impl ResultMessage {
             error_code: Some(code),
             error_message: message,
             payload_ref: String::new(),
+            payload_location: String::new(),
             content_type: String::new(),
             payload_size: 0,
             payload_sha256: String::new(),
@@ -85,6 +92,7 @@ impl ResultMessage {
             error_code: None,
             error_message: String::new(),
             payload_ref: String::new(),
+            payload_location: String::new(),
             content_type: String::new(),
             payload_size: 0,
             payload_sha256: String::new(),
@@ -95,11 +103,20 @@ impl ResultMessage {
     pub fn http_by_reference(req: &InternalRequest, status_code: u16, body: StoredBody) -> Self {
         Self {
             payload_ref: body.payload_ref,
+            payload_location: body.location.unwrap_or_default(),
             content_type: body.content_type,
             payload_size: body.size,
             payload_sha256: body.sha256,
             ..Self::http(req, status_code, b"")
         }
+    }
+
+    pub fn gate_error(req: &InternalRequest, error: &impl std::fmt::Display) -> Self {
+        Self::error(
+            req,
+            ErrorCode::GateError,
+            format!("Pool gating error: {error}"),
+        )
     }
 
     pub fn deadline_exceeded(req: &InternalRequest) -> Self {
@@ -180,6 +197,7 @@ mod tests {
             200,
             StoredBody {
                 payload_ref: "blob://results/tok".into(),
+                location: Some("s3://b/p/results/tok".into()),
                 content_type: "audio/wav".into(),
                 size: 42,
                 sha256: "ab".into(),
@@ -193,6 +211,7 @@ mod tests {
                 "status_code": 200,
                 "payload": "",
                 "payload_ref": "blob://results/tok",
+                "payload_location": "s3://b/p/results/tok",
                 "content_type": "audio/wav",
                 "payload_size": 42,
                 "payload_sha256": "ab",

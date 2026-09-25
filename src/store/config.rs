@@ -37,7 +37,8 @@ pub enum Backend {
 pub enum BlobLocation {
     /// Files under the embedded store's directory.
     Local,
-    /// Chunked rows in the Postgres store's database.
+    /// Chunked rows in the Postgres store's database. Every byte goes
+    /// through Postgres's WAL and memory, so only for development and tests.
     Postgres,
     /// An object store URL: `s3://`, `gs://`, `az://`, `file://`. Postgres
     /// store only.
@@ -62,7 +63,8 @@ impl FromStr for BlobLocation {
 #[derive(Debug, Clone)]
 pub struct StoreConfig {
     pub backend: Backend,
-    /// `None` picks the backend's own: local files or Postgres rows.
+    /// `None` means local files for the embedded store. The Postgres store
+    /// has no default: its large bodies belong in an object store.
     pub blobs: Option<BlobLocation>,
     pub result_blob_retention: Duration,
 }
@@ -72,11 +74,25 @@ pub struct Opened {
     pub counters: Arc<dyn Counters>,
 }
 
+fn url_of(location: &BlobLocation) -> Result<&str, StoreError> {
+    match location {
+        BlobLocation::Object(url) => Ok(url),
+        other => Err(StoreError::Config(format!(
+            "{other:?} blobs cannot be shared by Postgres replicas"
+        ))),
+    }
+}
+
 impl StoreConfig {
     fn blob_location(&self) -> Result<BlobLocation, StoreError> {
         match (&self.backend, &self.blobs) {
             (Backend::Embedded { .. }, None) => Ok(BlobLocation::Local),
-            (Backend::Postgres { .. }, None) => Ok(BlobLocation::Postgres),
+            (Backend::Postgres { .. }, None) => Err(StoreError::Config(
+                "--store postgres needs --blob-store: an object store URL (s3://bucket/prefix) \
+                 for request and result bodies over --inline-payload-limit, or 'postgres' to \
+                 keep them in the database (development only)"
+                    .into(),
+            )),
             (Backend::Embedded { .. }, Some(BlobLocation::Postgres)) => Err(StoreError::Config(
                 "--blob-store postgres needs --store postgres".into(),
             )),
@@ -127,10 +143,14 @@ impl StoreConfig {
             } => {
                 let db = Database::connect(url, *max_connections, ca_cert.as_deref()).await?;
                 let blobs = match &location {
-                    BlobLocation::Object(url) => {
-                        BlobStore::new(Arc::new(ObjectBlobs::from_url(url)?))
+                    BlobLocation::Postgres => {
+                        tracing::warn!(
+                            "large request and result bodies are kept in Postgres; use an \
+                             object store (--blob-store s3://...) outside development"
+                        );
+                        BlobStore::new(Arc::new(PostgresBlobs::new(db.pool.clone())))
                     }
-                    _ => BlobStore::new(Arc::new(PostgresBlobs::new(db.pool.clone()))),
+                    _ => BlobStore::new(Arc::new(ObjectBlobs::from_url(url_of(&location)?)?)),
                 };
                 let options = PostgresOptions {
                     lease_ttl: *lease_ttl,
@@ -207,10 +227,11 @@ mod tests {
                 .validate()
                 .is_err()
         );
+        let no_blobs = config(postgres(), None).validate().unwrap_err().to_string();
+        assert!(no_blobs.contains("s3://"), "{no_blobs}");
         for ok in [
             config(embedded(), None),
             config(embedded(), Some(BlobLocation::Local)),
-            config(postgres(), None),
             config(postgres(), Some(BlobLocation::Postgres)),
             config(postgres(), Some(BlobLocation::Object("s3://b".into()))),
         ] {

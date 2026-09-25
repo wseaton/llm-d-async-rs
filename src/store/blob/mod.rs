@@ -67,6 +67,12 @@ pub trait BlobBackend: Send + Sync {
 
     /// Every blob last written at or before `cutoff_ms`, committed or not.
     fn list(&self, cutoff_ms: i64) -> BoxFuture<'_, Result<Vec<Listed>, BlobError>>;
+
+    /// Where `key` lives for readers that can reach this backend directly:
+    /// an object store URL. `None` for storage only the processor can read.
+    fn location(&self, _key: &BlobKey) -> Option<String> {
+        None
+    }
 }
 
 /// One blob being written. Dropped before [`BlobUpload::commit`], it
@@ -140,6 +146,10 @@ impl BlobStore {
 
     pub async fn list(&self, cutoff_ms: i64) -> Result<Vec<Listed>, BlobError> {
         self.0.list(cutoff_ms).await
+    }
+
+    pub fn location(&self, key: &BlobKey) -> Option<String> {
+        self.0.location(key)
     }
 }
 

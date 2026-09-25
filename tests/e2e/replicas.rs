@@ -102,7 +102,9 @@ async fn a_killed_replicas_requests_finish_on_the_survivor() {
     a.kill().await;
 
     let ids = result_ids(&b, n).await;
-    assert_eq!(ids.len(), n);
+    let want: Vec<String> = (0..n).map(|i| format!("r{i:02}")).collect();
+    assert_eq!(ids, want, "every request finished exactly once");
+    b.no_result_within(RESULTS, Duration::from_secs(1)).await;
     assert_eq!(up_a.count(), stuck, "the dead replica sent nothing more");
     assert_eq!(
         up_b.count(),
@@ -182,21 +184,23 @@ async fn a_tenant_quota_holds_across_replicas() {
     assert_eq!(upstream.max_inflight(), 2);
 }
 
+/// `blob_store` is `postgres`, or `None` for the test's object store.
 async fn large_bodies_cross_replicas(blob_store: Option<&str>) {
     let Some(db) = Postgres::schema().await else {
         return;
     };
+    let object_url = db.blob_url();
     let upstream = Upstream::start().await;
     let audio: Vec<u8> = (0..(3 << 20)).map(|i| (i % 251) as u8).collect();
     let reply = audio.clone();
     upstream.reply_with(move |_, _| Reply::bytes(200, "audio/mpeg", reply.clone()));
     let dir = tempfile::tempdir().unwrap();
     let spec = |db: &Postgres| {
-        let spec = Spec::new(transport(&upstream)).postgres(db, LEASE);
-        match blob_store {
-            Some(url) => spec.arg("--blob-store", url),
-            None => spec,
-        }
+        Spec::new(transport(&upstream)).postgres_with_blobs(
+            db,
+            LEASE,
+            blob_store.unwrap_or(&object_url),
+        )
     };
     let a = start(&dir, "a", spec(&db)).await;
     let b = start(&dir, "b", spec(&db)).await;
@@ -232,6 +236,16 @@ async fn large_bodies_cross_replicas(blob_store: Option<&str>) {
         .strip_prefix("blob://results/")
         .unwrap()
         .to_owned();
+    match blob_store {
+        None => assert_eq!(
+            result["payload_location"],
+            format!("{object_url}/results/{name}")
+        ),
+        Some(_) => assert!(
+            result.get("payload_location").is_none(),
+            "rows in Postgres have no location outside the processor"
+        ),
+    }
     for via in [&a, &b] {
         let blob = via.get(&format!("/v1/blobs/results/{name}")).await;
         assert_eq!(blob.status(), StatusCode::OK);
@@ -248,19 +262,58 @@ async fn large_bodies_cross_replicas(blob_store: Option<&str>) {
     assert_eq!(a.ack(RESULTS, &claim).await, StatusCode::NO_CONTENT);
     let gone = b.get(&format!("/v1/blobs/results/{name}")).await;
     assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    if blob_store.is_none() {
+        let left = walk(db.blobs.path());
+        assert!(left.is_empty(), "blobs left behind: {left:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn large_bodies_cross_replicas_in_postgres() {
-    large_bodies_cross_replicas(None).await;
+async fn large_bodies_cross_replicas_in_postgres_rows() {
+    large_bodies_cross_replicas(Some("postgres")).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn large_bodies_cross_replicas_in_an_object_store() {
-    let blobs = tempfile::tempdir().unwrap();
-    large_bodies_cross_replicas(Some(&format!("file://{}", blobs.path().display()))).await;
-    let left: Vec<_> = walk(blobs.path());
-    assert!(left.is_empty(), "blobs left behind: {left:?}");
+    large_bodies_cross_replicas(None).await;
+}
+
+/// A long text prompt, over the inline limit, travels through the object
+/// store and reaches the gateway byte for byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn large_text_requests_go_to_the_object_store() {
+    let Some(db) = Postgres::schema().await else {
+        return;
+    };
+    let upstream = Upstream::start().await;
+    upstream.reply_with(|r, _| Reply::json(200, json!({"len": r.body.len()})));
+    let dir = tempfile::tempdir().unwrap();
+    let a = start(
+        &dir,
+        "a",
+        Spec::new(transport(&upstream)).postgres(&db, LEASE),
+    )
+    .await;
+    let prompt: String = (0..40_000).map(|i| format!("word{} ", i % 97)).collect();
+    let mut request = request("long", 120);
+    request["payload"] = json!({"model": "m", "prompt": prompt});
+    let sent = serde_json::to_vec(&request["payload"]).unwrap();
+    assert!(sent.len() > 64 * 1024);
+    a.submit(request).await;
+
+    let seen = upstream.wait_for_requests(1).await;
+    assert_eq!(
+        seen[0].body.as_ref(),
+        sent.as_slice(),
+        "prompt changed in transit"
+    );
+    let result = a.next_result(RESULTS).await;
+    assert_eq!(result["status_code"], 200);
+    let left = walk(db.blobs.path());
+    assert!(
+        left.is_empty(),
+        "the request blob outlived its request: {left:?}"
+    );
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

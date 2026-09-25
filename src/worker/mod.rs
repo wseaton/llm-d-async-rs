@@ -277,20 +277,25 @@ impl Worker {
                 verdict = gate.apply(envelope, releases) => verdict,
             };
             match verdict {
-                Verdict::Continue => return None,
-                Verdict::Drop(result) => {
+                Err(e) => {
+                    tracing::error!(id = %envelope.request.id, error = %e, "pool gating failed");
+                    self.metrics.gate_decision(&pool_labels, GateReason::Error);
+                    return Some(End::Finish(ResultMessage::gate_error(envelope, &e)));
+                }
+                Ok(Verdict::Continue) => return None,
+                Ok(Verdict::Drop(result)) => {
                     self.metrics
                         .gate_decision(&pool_labels, GateReason::Dropped);
                     return Some(End::Finish(
-                        result.unwrap_or_else(|| ResultMessage::gate_dropped(envelope)),
+                        result.map_or_else(|| ResultMessage::gate_dropped(envelope), |r| *r),
                     ));
                 }
-                Verdict::Refuse => {
+                Ok(Verdict::Refuse) => {
                     self.metrics
                         .gate_decision(&pool_labels, gate_reason(envelope));
                     return Some(End::Retry(0.0));
                 }
-                Verdict::Wait => {
+                Ok(Verdict::Wait) => {
                     if !wait_recorded {
                         self.metrics
                             .gate_decision(&pool_labels, gate_reason(envelope));

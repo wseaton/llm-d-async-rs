@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::api::request::InternalRequest;
 use crate::api::result::ResultMessage;
 use crate::boxed::BoxFuture;
+use crate::gate::admission::counters::CounterError;
 use crate::gate::release::Releases;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,11 +28,19 @@ pub enum Verdict {
     /// Dispatch the request.
     Continue,
     /// Finish the request now, with the given result or a GATE_DROPPED one.
-    Drop(Option<ResultMessage>),
+    Drop(Option<Box<ResultMessage>>),
     /// Return the request to its queue.
     Refuse,
     /// Park the worker and ask again (pool-level gates only).
     Wait,
+}
+
+/// A gate that could not decide. At queue level the request stays queued; at
+/// pool level it finishes with GATE_ERROR.
+#[derive(Debug, thiserror::Error)]
+pub enum GateError {
+    #[error(transparent)]
+    Counter(#[from] CounterError),
 }
 
 pub trait Gate: Send + Sync {
@@ -44,7 +53,7 @@ pub trait Gate: Send + Sync {
         &'a self,
         msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict>;
+    ) -> BoxFuture<'a, Result<Verdict, GateError>>;
 }
 
 pub type SharedGate = Arc<dyn Gate>;
@@ -58,22 +67,24 @@ pub fn budget_verdict(budget: f64) -> Verdict {
     }
 }
 
-/// Runs gates in order and stops at the first non-continue verdict, giving
-/// back every reservation the chain took.
+/// Runs gates in order and stops at the first non-continue verdict or error,
+/// giving back every reservation the chain took.
 pub async fn apply_chain(
     gates: &[SharedGate],
     msg: &mut InternalRequest,
     releases: &mut Releases,
-) -> Verdict {
+) -> Result<Verdict, GateError> {
     let snapshot = releases.len();
     for gate in gates {
-        let verdict = gate.apply(msg, releases).await;
-        if verdict != Verdict::Continue {
-            releases.release_from(snapshot);
-            return verdict;
+        match gate.apply(msg, releases).await {
+            Ok(Verdict::Continue) => {}
+            other => {
+                releases.release_from(snapshot);
+                return other;
+            }
         }
     }
-    Verdict::Continue
+    Ok(Verdict::Continue)
 }
 
 #[cfg(test)]
@@ -86,7 +97,7 @@ pub(crate) mod test_support {
     use crate::api::routing::InternalRouting;
     use crate::boxed::BoxFuture;
     use crate::gate::release::Releases;
-    use crate::gate::{Gate, Verdict};
+    use crate::gate::{Gate, GateError, Verdict};
 
     pub fn request(metadata: &[(&str, &str)]) -> InternalRequest {
         InternalRequest {
@@ -134,14 +145,14 @@ pub(crate) mod test_support {
             &'a self,
             _msg: &'a mut InternalRequest,
             releases: &'a mut Releases,
-        ) -> BoxFuture<'a, Verdict> {
+        ) -> BoxFuture<'a, Result<Verdict, GateError>> {
             Box::pin(async move {
                 self.held.fetch_add(1, Ordering::SeqCst);
                 let held = Arc::clone(&self.held);
                 releases.push(move || {
                     held.fetch_sub(1, Ordering::SeqCst);
                 });
-                self.verdict.clone()
+                Ok(self.verdict.clone())
             })
         }
     }
@@ -164,10 +175,10 @@ mod tests {
         let mut releases = Releases::default();
         let mut msg = request(&[]);
         use crate::gate::Gate;
-        outside.apply(&mut msg, &mut releases).await;
+        outside.apply(&mut msg, &mut releases).await.unwrap();
         let chain: Vec<SharedGate> = vec![first.clone(), second.clone()];
         assert_eq!(
-            apply_chain(&chain, &mut msg, &mut releases).await,
+            apply_chain(&chain, &mut msg, &mut releases).await.unwrap(),
             Verdict::Refuse
         );
         assert_eq!(first.held.load(Ordering::SeqCst), 0);
@@ -183,7 +194,9 @@ mod tests {
         let chain: Vec<SharedGate> = vec![a.clone(), a.clone()];
         let mut releases = Releases::default();
         assert_eq!(
-            apply_chain(&chain, &mut request(&[]), &mut releases).await,
+            apply_chain(&chain, &mut request(&[]), &mut releases)
+                .await
+                .unwrap(),
             Verdict::Continue
         );
         assert_eq!(a.held.load(Ordering::SeqCst), 2);

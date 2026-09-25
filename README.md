@@ -85,8 +85,15 @@ results are stored apart from the queue:
 | `--blob-store` | where | with |
 |---|---|---|
 | `local` (embedded default) | files under `--data-dir/blobs` | embedded only |
-| `postgres` (Postgres default) | 1 MiB rows in the same database | Postgres only |
-| `s3://bucket/prefix`, `gs://…`, `az://…`, `file:///…` | an object store | Postgres only |
+| `s3://bucket/prefix`, `gs://…`, `az://…`, `file:///…` | an object store | Postgres (required) |
+| `postgres` | 1 MiB rows in the same database | Postgres, development only |
+
+The Postgres store has no default blob store: audio and long prompts would
+otherwise go through Postgres's WAL and memory. Bodies up to
+`--inline-payload-limit` (64 KiB) stay in the queue row either way. Results
+stored in an object store carry `payload_location`, the object's URL, so a
+consumer with access to the bucket (the batch gateway's files store) can copy
+it server-side instead of reading it through the processor.
 
 Object store credentials come from the provider's usual environment variables
 (`AWS_*`, `GOOGLE_*`, `AZURE_*`). The store deletes blobs nothing references
@@ -104,7 +111,7 @@ were written. Set a lifecycle rule to abort incomplete multipart uploads.
 | `--database-ca-cert` | | extra CA for Postgres (native TLS) |
 | `--partition-lease-ttl` | 30s | how long a dead replica's partitions and quota slots stay held |
 | `--partition-handoff-timeout` | 15m | longest a draining partition waits for its claims |
-| `--blob-store` | per store | see [Blob stores](#stores-and-replicas) |
+| `--blob-store` / `BLOB_STORE` | `local` (embedded) | required with Postgres; see [Blob stores](#stores-and-replicas) |
 | `--api-addr` | `0.0.0.0:8080` | producer/consumer API |
 | `--health-port` / `--metrics-port` | 8081 / 9090 | `/healthz`, `/readyz` / `/metrics` |
 | `--concurrency` | 64 | workers in the default pool when no pool file is given |
@@ -182,11 +189,16 @@ submission, leased delivery (`ReceiveResult`/`RenewResult`/`AckResult`), and
 `OpenResultBody` for results stored by reference. Its tests run the real
 binary on both stores.
 
-Results use the Go `ResultMessage` wire format. A 2xx response whose media
-type is not JSON (audio, images, anything binary) is streamed into a blob, and
-the result carries `payload_ref`, `content_type`, `payload_size` and
-`payload_sha256` instead of an inline `payload`. The fields match
-`feat/result-payload-ref` in the Go repo.
+Results use the Go `ResultMessage` wire format. Response bodies are inline
+in `payload`, as in Go, unless they are binary: a 2xx response with a binary
+media type (`audio/*`, `image/*`, `video/*`, `font/*`, `model/*`,
+`application/octet-stream`, `application/pdf`, archives, protobuf, msgpack,
+CBOR) is streamed into a blob, and any other successful response whose body
+is not UTF-8 is stored the same way. The result then carries `payload_ref`,
+`content_type`, `payload_size` and `payload_sha256` instead of an inline
+`payload`. JSON, `text/*` (including `text/event-stream`), and untyped
+responses stay inline. The fields match `feat/result-payload-ref` in the Go
+repo; its rule (anything not JSON goes to a blob) does not.
 
 ## Gates
 
@@ -195,7 +207,8 @@ the result carries `payload_ref`, `content_type`, `payload_size` and
 `redis`), `leased-rate` (alias `redis-leased-rate`), `prometheus-saturation`,
 `prometheus-budget`, `prometheus-query`, `endpoint-scrape`. Params match the
 Go gates. With the aliases, a Redis `address` is ignored. Quota gates that
-share a `prefix` share per-tenant counters, as they shared Redis keys before.
+share a `prefix` and `attribute` share per-tenant counters, keyed
+`<prefix><attribute>:<value>` as the Redis keys were.
 
 ## Differences from the Go processor
 

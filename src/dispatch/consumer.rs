@@ -166,14 +166,19 @@ impl Consumer {
                 }
             };
             match verdict {
-                Verdict::Refuse | Verdict::Wait => self.refused(&envelope),
-                Verdict::Drop(result) => {
+                Err(e) => {
+                    tracing::error!(id = %envelope.request.id, error = %e, "gating failed");
+                    self.metrics.gate_decision(&self.labels, GateReason::Error);
+                }
+                Ok(Verdict::Refuse | Verdict::Wait) => self.refused(&envelope),
+                Ok(Verdict::Drop(result)) => {
                     self.metrics
                         .gate_decision(&self.labels, GateReason::Dropped);
-                    let result = result.unwrap_or_else(|| ResultMessage::gate_dropped(&envelope));
+                    let result =
+                        result.map_or_else(|| ResultMessage::gate_dropped(&envelope), |r| *r);
                     pending.push(finish(envelope, result));
                 }
-                Verdict::Continue => {
+                Ok(Verdict::Continue) => {
                     let admission = Admission::Claim {
                         key: peeked.key,
                         generation: envelope.generation_key(),

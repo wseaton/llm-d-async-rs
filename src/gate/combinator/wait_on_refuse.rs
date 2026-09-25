@@ -1,7 +1,7 @@
 use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{Gate, SharedGate, Verdict};
+use crate::gate::{Gate, GateError, SharedGate, Verdict};
 
 /// Turns the inner gate's `Refuse` into `Wait`, so a pool-level gate parks
 /// the worker instead of returning the request to its queue.
@@ -24,11 +24,11 @@ impl Gate for WaitOnRefuseGate {
         &'a self,
         msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
         Box::pin(async move {
-            match self.inner.apply(msg, releases).await {
-                Verdict::Refuse => Verdict::Wait,
-                other => other,
+            match self.inner.apply(msg, releases).await? {
+                Verdict::Refuse => Ok(Verdict::Wait),
+                other => Ok(other),
             }
         })
     }
@@ -52,7 +52,9 @@ mod tests {
         ] {
             let g = WaitOnRefuseGate::new(Arc::new(FixedGate::new(0.4, inner)));
             assert_eq!(
-                g.apply(&mut request(&[]), &mut Releases::default()).await,
+                g.apply(&mut request(&[]), &mut Releases::default())
+                    .await
+                    .unwrap(),
                 want
             );
             assert_eq!(g.budget().await, 0.4);

@@ -1,7 +1,7 @@
 use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{Gate, Verdict, budget_verdict};
+use crate::gate::{Gate, GateError, Verdict, budget_verdict};
 use crate::store::Store;
 
 /// Reads its budget from a store key an operator or controller sets through
@@ -46,8 +46,8 @@ impl Gate for BudgetKeyGate {
         &'a self,
         _msg: &'a mut InternalRequest,
         _releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
-        Box::pin(async move { budget_verdict(self.budget().await) })
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
+        Box::pin(async move { Ok(budget_verdict(self.budget().await)) })
     }
 }
 

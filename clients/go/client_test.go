@@ -160,6 +160,12 @@ func TestStreamedBodyAndResultByReference(t *testing.T) {
 		}
 		r := d.Result
 		sum := sha256.Sum256(up.audio)
+		if r.RequestToken == "" {
+			t.Fatal("result carries no request token")
+		}
+		if p.postgres != strings.HasPrefix(r.PayloadLocation, "file://") {
+			t.Fatalf("location %q: want an object store URL exactly when the processor uses one", r.PayloadLocation)
+		}
 		if r.PayloadRef == "" || r.ContentType != "audio/mpeg" || r.PayloadSize != int64(len(up.audio)) ||
 			r.PayloadSHA256 != hex.EncodeToString(sum[:]) || r.Payload != "" {
 			t.Fatalf("result %+v", r)

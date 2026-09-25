@@ -171,7 +171,8 @@ pub trait QueueStore: Send + Sync {
     /// Results waiting on `route`, excluding leased ones.
     fn result_depth(&self, route: String, now_ms: i64) -> BoxFuture<'_, Result<u64, StoreError>>;
 
-    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Option<Vec<u8>>, StoreError>>;
+    /// A control-plane value, stamped with the store's clock when it was read.
+    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Stamped<Option<Vec<u8>>>, StoreError>>;
 
     /// Sets (`Some`) or clears (`None`) a control-plane value.
     fn kv_put(&self, key: String, value: Option<Vec<u8>>) -> BoxFuture<'_, Result<(), StoreError>>;
@@ -189,6 +190,14 @@ pub trait QueueStore: Send + Sync {
     fn close(&self) -> BoxFuture<'_, Result<(), StoreError>>;
 }
 
+/// A value read from a store, with the store's clock at the read. Replicas
+/// sharing a store agree on this clock; their own clocks may drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamped<T> {
+    pub value: T,
+    pub now_ms: i64,
+}
+
 fn budget_key(key: &str) -> String {
     format!("budget/{key}")
 }
@@ -200,7 +209,7 @@ fn dispatch_rate_key(key: &str) -> String {
 impl dyn QueueStore {
     /// The raw budget value, as the operator wrote it.
     pub async fn budget(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        self.kv_get(budget_key(key)).await
+        Ok(self.kv_get(budget_key(key)).await?.value)
     }
 
     /// Sets (`Some`) or clears (`None`) a budget value.
@@ -208,16 +217,18 @@ impl dyn QueueStore {
         self.kv_put(budget_key(key), value).await
     }
 
-    /// The stored dispatch-rate command. `Err` in the inner result means the
-    /// stored bytes do not decode, which gates must treat as fail-closed.
+    /// The stored dispatch-rate command, stamped with the store's clock so
+    /// every replica judges its expiry alike. `Err` in the inner result means
+    /// the stored bytes do not decode, which gates must treat as fail-closed.
     pub async fn dispatch_rate(
         &self,
         key: &str,
-    ) -> Result<Option<Result<DispatchRateLimit, serde_json::Error>>, StoreError> {
-        Ok(self
-            .kv_get(dispatch_rate_key(key))
-            .await?
-            .map(|bytes| serde_json::from_slice(&bytes)))
+    ) -> Result<Stamped<Option<Result<DispatchRateLimit, serde_json::Error>>>, StoreError> {
+        let read = self.kv_get(dispatch_rate_key(key)).await?;
+        Ok(Stamped {
+            value: read.value.map(|bytes| serde_json::from_slice(&bytes)),
+            now_ms: read.now_ms,
+        })
     }
 
     pub async fn set_dispatch_rate(

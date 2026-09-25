@@ -3,10 +3,9 @@ use std::sync::Arc;
 use crate::api::dispatch_rate::DispatchRateLimit;
 use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
-use crate::clock::now_millis;
 use crate::gate::admission::counters::{BucketSpec, Counters};
 use crate::gate::release::Releases;
-use crate::gate::{Gate, Verdict};
+use crate::gate::{Gate, GateError, Verdict};
 use crate::store::Store;
 use crate::telemetry::metrics::Metrics;
 
@@ -53,13 +52,16 @@ impl LeasedRateGate {
         }
     }
 
-    async fn lease(&self, now_ms: i64) -> Result<DispatchRateLimit, LeaseError> {
+    /// The lease, checked against the store's clock.
+    async fn lease(&self) -> Result<DispatchRateLimit, LeaseError> {
         let stored = self
             .store
             .dispatch_rate(&self.control_key)
             .await
             .map_err(|e| LeaseError::Invalid(e.to_string()))?;
+        let now_ms = stored.now_ms;
         let limit = stored
+            .value
             .ok_or(LeaseError::Missing)?
             .map_err(|e| LeaseError::Invalid(e.to_string()))?;
         limit
@@ -74,8 +76,8 @@ impl LeasedRateGate {
         Ok(limit)
     }
 
-    async fn observed_lease(&self, now_ms: i64) -> Option<DispatchRateLimit> {
-        match self.lease(now_ms).await {
+    async fn observed_lease(&self) -> Option<DispatchRateLimit> {
+        match self.lease().await {
             Ok(limit) => {
                 self.metrics.drain_limit(
                     &self.pool_id,
@@ -120,7 +122,7 @@ impl Gate for LeasedRateGate {
     /// `apply`.
     fn budget(&self) -> BoxFuture<'_, f64> {
         Box::pin(async move {
-            match self.observed_lease(now_millis()).await {
+            match self.observed_lease().await {
                 Some(limit) if limit.max_admission_rps > 0.0 => 1.0,
                 _ => 0.0,
             }
@@ -131,22 +133,21 @@ impl Gate for LeasedRateGate {
         &'a self,
         _msg: &'a mut InternalRequest,
         _releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
         Box::pin(async move {
-            let now_ms = now_millis();
-            let Some(limit) = self.observed_lease(now_ms).await else {
-                return Verdict::Refuse;
+            let Some(limit) = self.observed_lease().await else {
+                return Ok(Verdict::Refuse);
             };
             if limit.max_admission_rps == 0.0 {
-                return Verdict::Refuse;
+                return Ok(Verdict::Refuse);
             }
             if self
                 .take(limit.max_admission_rps, limit.valid_until_unix_millis)
                 .await
             {
-                Verdict::Continue
+                Ok(Verdict::Continue)
             } else {
-                Verdict::Refuse
+                Ok(Verdict::Refuse)
             }
         })
     }
@@ -194,10 +195,12 @@ mod tests {
         let fixture = open().await;
         let store = fixture.store.clone();
         let g = gate(&store, 1.0);
-        assert_eq!(g.lease(now_millis()).await, Err(LeaseError::Missing));
+        assert_eq!(g.lease().await, Err(LeaseError::Missing));
         assert_eq!(g.budget().await, 0.0);
         assert_eq!(
-            g.apply(&mut request(&[]), &mut Releases::default()).await,
+            g.apply(&mut request(&[]), &mut Releases::default())
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
 
@@ -220,7 +223,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            g.apply(&mut request(&[]), &mut Releases::default()).await,
+            g.apply(&mut request(&[]), &mut Releases::default())
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
 
@@ -230,7 +235,9 @@ mod tests {
             .unwrap();
         assert_eq!(g.budget().await, 0.0);
         assert_eq!(
-            g.apply(&mut request(&[]), &mut Releases::default()).await,
+            g.apply(&mut request(&[]), &mut Releases::default())
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
     }
@@ -247,7 +254,11 @@ mod tests {
         assert_eq!(g.budget().await, 1.0);
         let mut admitted = 0;
         for _ in 0..10 {
-            if g.apply(&mut request(&[]), &mut Releases::default()).await == Verdict::Continue {
+            if g.apply(&mut request(&[]), &mut Releases::default())
+                .await
+                .unwrap()
+                == Verdict::Continue
+            {
                 admitted += 1;
             }
         }

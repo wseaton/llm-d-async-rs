@@ -4,10 +4,10 @@ use bytes::Bytes;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 
 use crate::api::headers::DROPPED_REASON;
-use crate::api::payload::is_json_media_type;
+use crate::api::payload::is_binary_media_type;
 use crate::api::result::StoredBody;
 use crate::store::blob::key::BlobKey;
-use crate::store::blob::{BlobError, BlobStore};
+use crate::store::blob::{BlobError, BlobStore, BlobWriter};
 use crate::store::queue::PayloadBody;
 
 /// How an inference failure is handled: retried, shed, or final.
@@ -87,8 +87,9 @@ impl std::fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 pub enum ResponseBody {
+    /// Valid UTF-8.
     Inline(Bytes),
-    /// A 2xx non-JSON body, streamed into a result blob as it arrived.
+    /// A binary body, in a result blob.
     Stored(StoredBody),
 }
 
@@ -129,7 +130,9 @@ impl InferenceClient {
     }
 
     /// POSTs `payload` to `url`. The payload is streamed, never buffered. A
-    /// 2xx response that is not JSON is streamed into the blob `result_key`.
+    /// 2xx response with a binary media type is streamed into the blob
+    /// `result_key`; any other successful response is inlined unless it is
+    /// not UTF-8, in which case it goes to that blob too.
     pub async fn send(
         &self,
         url: &str,
@@ -168,17 +171,19 @@ impl InferenceClient {
         let retry_after = header(RETRY_AFTER.as_str()).and_then(|v| parse_retry_after(&v));
         let content_type = header(CONTENT_TYPE.as_str()).unwrap_or_default();
 
-        if (200..300).contains(&status) && !is_json_media_type(&content_type) {
+        let store_failed = |e: StoreBodyError| {
+            Box::new(ClientError {
+                status,
+                ..ClientError::new(ErrorCategory::Server, "failed to store response body")
+                    .caused_by(e)
+            })
+        };
+
+        if (200..300).contains(&status) && is_binary_media_type(&content_type) {
             let stored = self
-                .store_body(&mut response, &content_type, result_key)
+                .stream_body(&mut response, &content_type, result_key)
                 .await
-                .map_err(|e| {
-                    Box::new(ClientError {
-                        status,
-                        ..ClientError::new(ErrorCategory::Server, "failed to store response body")
-                            .caused_by(e)
-                    })
-                })?;
+                .map_err(store_failed)?;
             return Ok(InferenceResponse {
                 status,
                 body: ResponseBody::Stored(stored),
@@ -212,13 +217,23 @@ impl InferenceClient {
                 dropped_reason,
             }));
         }
+        if std::str::from_utf8(&body).is_err() {
+            let stored = self
+                .write_body(body, &content_type, result_key)
+                .await
+                .map_err(store_failed)?;
+            return Ok(InferenceResponse {
+                status,
+                body: ResponseBody::Stored(stored),
+            });
+        }
         Ok(InferenceResponse {
             status,
             body: ResponseBody::Inline(body),
         })
     }
 
-    async fn store_body(
+    async fn stream_body(
         &self,
         response: &mut reqwest::Response,
         content_type: &str,
@@ -228,9 +243,30 @@ impl InferenceClient {
         while let Some(chunk) = response.chunk().await? {
             writer.write(chunk).await?;
         }
+        Ok(self.commit(writer, content_type, key).await?)
+    }
+
+    async fn write_body(
+        &self,
+        body: Bytes,
+        content_type: &str,
+        key: &BlobKey,
+    ) -> Result<StoredBody, StoreBodyError> {
+        let mut writer = self.blobs.create(key).await?;
+        writer.write(body).await?;
+        Ok(self.commit(writer, content_type, key).await?)
+    }
+
+    async fn commit(
+        &self,
+        writer: BlobWriter,
+        content_type: &str,
+        key: &BlobKey,
+    ) -> Result<StoredBody, BlobError> {
         let digest = writer.commit().await?;
         Ok(StoredBody {
             payload_ref: key.to_ref(),
+            location: self.blobs.location(key),
             content_type: content_type.to_owned(),
             size: digest.size,
             sha256: digest.sha256,

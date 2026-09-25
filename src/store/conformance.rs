@@ -130,6 +130,7 @@ async fn write_blob(store: &Store, key: &BlobKey, body: &'static [u8]) -> Stored
     let digest = w.commit().await.unwrap();
     StoredBody {
         payload_ref: key.to_ref(),
+        location: store.blobs().location(key),
         content_type: "audio/wav".into(),
         size: digest.size,
         sha256: digest.sha256,
@@ -900,16 +901,29 @@ pub async fn dispatch_rate_round_trip(store: Store) {
         decision_id: "d".into(),
     };
     store.set_dispatch_rate("k", Some(&limit)).await.unwrap();
-    assert_eq!(
-        store.dispatch_rate("k").await.unwrap().unwrap().unwrap(),
-        limit
+    let before = crate::clock::now_millis();
+    let read = store.dispatch_rate("k").await.unwrap();
+    let after = crate::clock::now_millis();
+    assert_eq!(read.value.unwrap().unwrap(), limit);
+    assert!(
+        (before - 1_000..=after + 1_000).contains(&read.now_ms),
+        "store clock {} outside [{before}, {after}]",
+        read.now_ms
     );
-    assert!(store.dispatch_rate("other").await.unwrap().is_none());
+    assert!(store.dispatch_rate("other").await.unwrap().value.is_none());
     store
         .kv_put("dispatch-rate/bad".into(), Some(b"{".to_vec()))
         .await
         .unwrap();
-    assert!(store.dispatch_rate("bad").await.unwrap().unwrap().is_err());
+    assert!(
+        store
+            .dispatch_rate("bad")
+            .await
+            .unwrap()
+            .value
+            .unwrap()
+            .is_err()
+    );
 }
 
 pub async fn ping_succeeds(store: Store) {

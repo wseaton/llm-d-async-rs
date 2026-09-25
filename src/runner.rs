@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -70,6 +70,19 @@ async fn bind(addr: SocketAddr) -> Result<TcpListener, RunError> {
     TcpListener::bind(addr)
         .await
         .map_err(|source| RunError::Bind { addr, source })
+}
+
+/// Binds `port` on every interface: dual-stack where the host has IPv6,
+/// IPv4 where it does not.
+async fn bind_any(port: u16) -> Result<TcpListener, RunError> {
+    match TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(RunError::Bind {
+            addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            source: e,
+        }),
+        Err(_) => bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))).await,
+    }
 }
 
 fn serve(
@@ -184,18 +197,16 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
         ready: Arc::clone(&ready),
     };
     let servers = TaskTracker::new();
-    let health_addr = SocketAddr::from(([0, 0, 0, 0], cli.health_port));
-    let metrics_addr = SocketAddr::from(([0, 0, 0, 0], cli.metrics_port));
     serve(
         &servers,
-        bind(health_addr).await?,
+        bind_any(cli.health_port).await?,
         server::health_router(state.clone()),
         stop_servers.clone(),
         "health",
     );
     serve(
         &servers,
-        bind(metrics_addr).await?,
+        bind_any(cli.metrics_port).await?,
         server::metrics_router(state.clone()),
         stop_servers.clone(),
         "metrics",

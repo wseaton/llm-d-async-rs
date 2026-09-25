@@ -44,10 +44,12 @@ pub struct Cli {
     /// in-flight requests before it is released anyway.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub partition_handoff_timeout: Duration,
-    /// Where large request and result bodies go: `local` (embedded only),
-    /// `postgres` (Postgres only), or an object store URL (`s3://bucket/prefix`,
-    /// `gs://`, `az://`, `file://`). Defaults to the store's own.
-    #[arg(long)]
+    /// Where request bodies over --inline-payload-limit and binary results
+    /// (audio, images) go. With --store postgres, an object store URL
+    /// (`s3://bucket/prefix`, `gs://`, `az://`, `file://`) is required;
+    /// `postgres` keeps them in the database, for development only. The
+    /// embedded store uses `local` files under --data-dir.
+    #[arg(long, env = "BLOB_STORE")]
     pub blob_store: Option<BlobLocation>,
 
     /// Request payloads up to this many bytes are stored in the database;
@@ -240,7 +242,14 @@ mod tests {
         };
         assert!(no_url.validate().is_err());
         let url = ["--store", "postgres", "--database-url", "postgres://db/x"];
-        parse(&url).validate().unwrap();
+        let no_blobs = Cli {
+            blob_store: None,
+            ..parse(&url)
+        };
+        assert!(no_blobs.validate().is_err(), "large bodies need a store");
+        let mut rows = url.to_vec();
+        rows.extend(["--blob-store", "postgres"]);
+        parse(&rows).validate().unwrap();
         let mut local = url.to_vec();
         local.extend(["--blob-store", "local"]);
         assert!(parse(&local).validate().is_err());

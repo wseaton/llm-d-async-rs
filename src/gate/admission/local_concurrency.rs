@@ -6,7 +6,7 @@ use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
 use crate::gate::admission::GatingMode;
 use crate::gate::release::Releases;
-use crate::gate::{Gate, Verdict};
+use crate::gate::{Gate, GateError, Verdict};
 
 /// Caps requests in flight through this gate in this process.
 ///
@@ -41,7 +41,7 @@ impl Gate for LocalConcurrencyGate {
         &'a self,
         _msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
         Box::pin(async move {
             let permit = match self.mode {
                 GatingMode::Blocking => Arc::clone(&self.slots).acquire_owned().await.ok(),
@@ -50,9 +50,9 @@ impl Gate for LocalConcurrencyGate {
             match permit {
                 Some(permit) => {
                     releases.push(move || drop(permit));
-                    Verdict::Continue
+                    Ok(Verdict::Continue)
                 }
-                None => Verdict::Refuse,
+                None => Ok(Verdict::Refuse),
             }
         })
     }
@@ -73,12 +73,20 @@ mod tests {
         let g = LocalConcurrencyGate::new(2, GatingMode::Classifying);
         let mut a = Releases::default();
         let mut b = Releases::default();
-        assert_eq!(g.apply(&mut request(&[]), &mut a).await, Verdict::Continue);
+        assert_eq!(
+            g.apply(&mut request(&[]), &mut a).await.unwrap(),
+            Verdict::Continue
+        );
         assert_eq!(g.budget().await, 0.5);
-        assert_eq!(g.apply(&mut request(&[]), &mut b).await, Verdict::Continue);
+        assert_eq!(
+            g.apply(&mut request(&[]), &mut b).await.unwrap(),
+            Verdict::Continue
+        );
         assert_eq!(g.budget().await, 0.0);
         assert_eq!(
-            g.apply(&mut request(&[]), &mut Releases::default()).await,
+            g.apply(&mut request(&[]), &mut Releases::default())
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
         drop(a);
@@ -89,7 +97,7 @@ mod tests {
     async fn blocking_waits_for_a_slot() {
         let g = LocalConcurrencyGate::new(1, GatingMode::Blocking);
         let mut held = Releases::default();
-        g.apply(&mut request(&[]), &mut held).await;
+        g.apply(&mut request(&[]), &mut held).await.unwrap();
         let mut msg = request(&[]);
         let mut r = Releases::default();
         let waiting =
@@ -97,6 +105,9 @@ mod tests {
         assert!(waiting.is_err(), "must block while full");
         drop(held);
         let mut r = Releases::default();
-        assert_eq!(g.apply(&mut request(&[]), &mut r).await, Verdict::Continue);
+        assert_eq!(
+            g.apply(&mut request(&[]), &mut r).await.unwrap(),
+            Verdict::Continue
+        );
     }
 }

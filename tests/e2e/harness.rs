@@ -174,9 +174,10 @@ async fn record(State(state): State<Arc<UpstreamState>>, request: Request) -> Re
     }
     tokio::time::sleep(reply.delay).await;
     state.inflight.fetch_sub(1, Ordering::SeqCst);
-    let mut response = Response::builder()
-        .status(reply.status)
-        .header("content-type", reply.content_type);
+    let mut response = Response::builder().status(reply.status);
+    if !reply.content_type.is_empty() {
+        response = response.header("content-type", reply.content_type);
+    }
     for (k, v) in reply.headers {
         response = response.header(k, v);
     }
@@ -291,13 +292,20 @@ impl Spec {
         self
     }
 
-    /// Runs on the shared Postgres store at `db`. Partitions move between
-    /// replicas a third of `lease` apart.
+    /// Runs on the shared Postgres store at `db`, with large bodies in the
+    /// test's object store. Partitions move between replicas a third of
+    /// `lease` apart.
     pub fn postgres(self, db: &Postgres, lease: &str) -> Self {
+        let blobs = db.blob_url();
+        self.postgres_with_blobs(db, lease, &blobs)
+    }
+
+    pub fn postgres_with_blobs(self, db: &Postgres, lease: &str, blob_store: &str) -> Self {
         self.arg("--store", "postgres")
             .arg("--database-url", &db.url)
             .arg("--database-max-connections", "4")
             .arg("--partition-lease-ttl", lease)
+            .arg("--blob-store", blob_store)
     }
 }
 
@@ -306,6 +314,8 @@ impl Spec {
 pub struct Postgres {
     pub url: String,
     client: tokio_postgres::Client,
+    /// Stands in for the S3 bucket the replicas share.
+    pub blobs: tempfile::TempDir,
 }
 
 impl Postgres {
@@ -331,7 +341,15 @@ impl Postgres {
             ))
             .await
             .unwrap();
-        Some(Self { url, client })
+        Some(Self {
+            url,
+            client,
+            blobs: tempfile::tempdir().unwrap(),
+        })
+    }
+
+    pub fn blob_url(&self) -> String {
+        format!("file://{}", self.blobs.path().display())
     }
 
     /// Partitions of `queue` held per owner.

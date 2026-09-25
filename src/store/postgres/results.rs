@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::store::Stamped;
 use crate::store::blob::BlobBody;
 use crate::store::blob::key::BlobKey;
 use crate::store::error::StoreError;
@@ -248,12 +249,18 @@ impl Inner {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
-    pub(crate) async fn kv_get(&self, key: String) -> Result<Option<Vec<u8>>, StoreError> {
+    pub(crate) async fn kv_get(&self, key: String) -> Result<Stamped<Option<Vec<u8>>>, StoreError> {
         let client = self.pool.get().await?;
-        Ok(client
-            .query_opt("SELECT value FROM lda_kv WHERE key = $1", &[&key])
-            .await?
-            .map(|row| row.get(0)))
+        let row = client
+            .query_one(
+                &format!("SELECT (SELECT value FROM lda_kv WHERE key = $1), {DB_NOW_MS}"),
+                &[&key],
+            )
+            .await?;
+        Ok(Stamped {
+            value: row.get(0),
+            now_ms: row.get(1),
+        })
     }
 
     pub(crate) async fn kv_put(

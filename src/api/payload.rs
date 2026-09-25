@@ -22,40 +22,81 @@ pub enum PayloadStorage {
     Blob,
 }
 
-/// Whether a media type is JSON (`application/json` or `*/*+json`).
+/// Whether a media type names a binary body: `audio/*`, `image/*`,
+/// `video/*`, `font/*`, `model/*`, or a known binary `application/*` type.
 /// Parameters such as `charset` are ignored.
-pub fn is_json_media_type(content_type: &str) -> bool {
+pub fn is_binary_media_type(content_type: &str) -> bool {
     let media_type = content_type
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    media_type == JSON_CONTENT_TYPE || media_type.ends_with("+json")
+    let Some((kind, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+    match kind {
+        "audio" | "image" | "video" | "font" | "model" => true,
+        "application" => {
+            matches!(
+                subtype,
+                "octet-stream"
+                    | "pdf"
+                    | "zip"
+                    | "gzip"
+                    | "zstd"
+                    | "x-tar"
+                    | "protobuf"
+                    | "x-protobuf"
+                    | "msgpack"
+                    | "x-msgpack"
+                    | "cbor"
+                    | "wasm"
+            ) || subtype.ends_with("+zip")
+                || subtype.ends_with("+cbor")
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::api::payload::is_json_media_type;
+    use crate::api::payload::is_binary_media_type;
 
     #[test]
-    fn json_media_types() {
+    fn binary_media_types() {
         for ct in [
+            "audio/wav",
+            "Audio/MPEG; rate=44100",
+            " image/png ",
+            "image/svg+xml",
+            "video/mp4",
+            "font/woff2",
+            "model/gltf-binary",
+            "application/octet-stream",
+            "application/pdf",
+            "application/zip",
+            "application/gzip",
+            "application/x-protobuf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document+zip",
+            "application/vnd.example+cbor",
+        ] {
+            assert!(is_binary_media_type(ct), "{ct}");
+        }
+        for ct in [
+            "",
+            "garbage",
             "application/json",
             "Application/JSON; charset=utf-8",
             "application/problem+json",
-            " application/json ",
-        ] {
-            assert!(is_json_media_type(ct), "{ct}");
-        }
-        for ct in [
-            "audio/wav",
-            "text/plain",
-            "",
             "application/jsonl",
-            "application/octet-stream",
+            "application/x-ndjson",
+            "application/xml",
+            "text/plain",
+            "text/event-stream",
+            "text/html; charset=utf-8",
         ] {
-            assert!(!is_json_media_type(ct), "{ct}");
+            assert!(!is_binary_media_type(ct), "{ct}");
         }
     }
 }

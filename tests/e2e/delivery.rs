@@ -182,6 +182,95 @@ async fn large_binary_payload_streams_through_and_result_comes_back_by_reference
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn text_results_are_inline_and_non_utf8_results_go_by_reference() {
+    let replies: Vec<(&str, &str, Vec<u8>)> = vec![
+        ("json", "application/json", br#"{"a":1}"#.to_vec()),
+        (
+            "sse",
+            "text/event-stream",
+            b"data: {\"x\":1}\n\ndata: [DONE]\n\n".to_vec(),
+        ),
+        (
+            "plain",
+            "text/plain; charset=utf-8",
+            "h\u{e9}llo w\u{f6}rld".into(),
+        ),
+        ("untyped", "", b"no content type".to_vec()),
+        (
+            "latin1",
+            "text/plain; charset=iso-8859-1",
+            vec![0x68, 0xe9, 0xff],
+        ),
+        ("raw", "", vec![0x00, 0xc3, 0x28, 0xfe]),
+    ];
+    let upstream = Upstream::start().await;
+    let table = replies.clone();
+    upstream.reply_with(move |seen, _| {
+        let id = seen.json()["prompt"].as_str().unwrap().to_owned();
+        let (_, content_type, body) = table.iter().find(|(i, _, _)| *i == id).unwrap();
+        Reply::bytes(200, content_type, body.clone())
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let p = Processor::start(
+        dir.path(),
+        Spec::new(transport(json!([queue("q", &upstream)]))),
+    )
+    .await;
+    for (id, _, _) in &replies {
+        p.submit(request(id, 60)).await;
+    }
+    let mut claims = std::collections::BTreeMap::new();
+    for _ in &replies {
+        let claim = crate::harness::eventually("a result", || p.claim(RESULTS, 60_000)).await;
+        claims.insert(claim["result"]["id"].as_str().unwrap().to_owned(), claim);
+    }
+
+    for (id, content_type, body) in &replies {
+        let result = &claims[*id]["result"];
+        assert_eq!(result["status_code"], 200, "{id}");
+        match std::str::from_utf8(body) {
+            Ok(text) => {
+                assert_eq!(result["payload"], text, "{id}");
+                for field in [
+                    "payload_ref",
+                    "content_type",
+                    "payload_size",
+                    "payload_sha256",
+                ] {
+                    assert!(result.get(field).is_none(), "{id}: {field} in {result}");
+                }
+            }
+            Err(_) => {
+                assert_eq!(result["payload"], "", "{id}");
+                assert_eq!(result["payload_size"], body.len(), "{id}");
+                assert_eq!(result["payload_sha256"], hex(&Sha256::digest(body)), "{id}");
+                let name = result["payload_ref"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("blob://results/")
+                    .expect("a result blob reference");
+                let blob = p.get(&format!("/v1/blobs/results/{name}")).await;
+                assert_eq!(blob.status(), StatusCode::OK, "{id}");
+                let served = if content_type.is_empty() {
+                    assert!(result.get("content_type").is_none(), "{id}: {result}");
+                    "application/octet-stream"
+                } else {
+                    assert_eq!(result["content_type"], *content_type, "{id}");
+                    content_type
+                };
+                assert_eq!(blob.headers()["content-type"], served, "{id}");
+                assert_eq!(
+                    blob.bytes().await.unwrap().as_ref(),
+                    body.as_slice(),
+                    "{id}"
+                );
+            }
+        }
+        assert_eq!(p.ack(RESULTS, &claims[*id]).await, StatusCode::NO_CONTENT);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unacknowledged_result_is_redelivered_and_stale_owner_fenced() {
     let upstream = Upstream::start().await;
     let dir = tempfile::tempdir().unwrap();

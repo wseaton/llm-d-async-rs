@@ -3,7 +3,7 @@ use crate::api::result::ResultMessage;
 use crate::api::routing::{Classification, Tier};
 use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{Gate, SharedGate, Verdict};
+use crate::gate::{Gate, GateError, SharedGate, Verdict};
 
 /// Admits everything while the saturation gate admits. Once it refuses:
 /// reserved traffic waits, interactive overflow is dropped with a 429-style
@@ -31,12 +31,12 @@ impl Gate for TierAdmissionGate {
         &'a self,
         msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
         Box::pin(async move {
-            if self.saturation.apply(msg, releases).await != Verdict::Refuse {
-                return Verdict::Continue;
+            if self.saturation.apply(msg, releases).await? != Verdict::Refuse {
+                return Ok(Verdict::Continue);
             }
-            match msg.routing.classification() {
+            Ok(match msg.routing.classification() {
                 Some(Classification::Reserved) => Verdict::Wait,
                 Some(Classification::Overflow)
                     if msg.routing.labels.get(&self.tier_label).map(String::as_str)
@@ -44,10 +44,10 @@ impl Gate for TierAdmissionGate {
                 {
                     let mut result = ResultMessage::http(msg, 0, b"");
                     result.payload = r#"{"error": "Too Many Requests", "code": 429}"#.to_owned();
-                    Verdict::Drop(Some(result))
+                    Verdict::Drop(Some(Box::new(result)))
                 }
                 _ => Verdict::Refuse,
-            }
+            })
         })
     }
 }
@@ -74,7 +74,7 @@ mod tests {
         if let Some(t) = tier {
             msg.routing.labels.insert("sla".into(), t.into());
         }
-        g.apply(&mut msg, &mut Releases::default()).await
+        g.apply(&mut msg, &mut Releases::default()).await.unwrap()
     }
 
     #[tokio::test]

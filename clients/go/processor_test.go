@@ -129,7 +129,8 @@ func startProcessor(t *testing.T, up *upstream, postgresURL string) *processor {
 		}
 		if p.postgres {
 			args = append(args, "--store", "postgres", "--database-url", postgresURL,
-				"--database-max-connections", "4", "--partition-lease-ttl", "3s")
+				"--database-max-connections", "4", "--partition-lease-ttl", "3s",
+				"--blob-store", "file://"+filepath.Join(dir, "blobs"))
 		}
 		log, err := os.Create(filepath.Join(dir, fmt.Sprintf("processor-%d.log", attempt)))
 		if err != nil {

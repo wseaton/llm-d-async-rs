@@ -25,6 +25,8 @@ const PART_CONCURRENCY: usize = 4;
 pub struct ObjectBlobs {
     store: Arc<dyn ObjectStore>,
     prefix: Path,
+    /// The store's URL, without a trailing slash.
+    base: String,
 }
 
 impl ObjectBlobs {
@@ -35,6 +37,7 @@ impl ObjectBlobs {
         Ok(Self {
             store: Arc::from(store),
             prefix,
+            base: url.as_str().trim_end_matches('/').to_owned(),
         })
     }
 
@@ -118,6 +121,10 @@ impl BlobBackend for ObjectBlobs {
             Ok(out)
         })
     }
+
+    fn location(&self, key: &BlobKey) -> Option<String> {
+        Some(format!("{}/{}/{}", self.base, key.dir(), key.name()))
+    }
 }
 
 struct ObjectUpload {
@@ -187,6 +194,26 @@ mod tests {
         let store = BlobStore::new(Arc::new(blobs));
         assert!(store.list(i64::MAX).await.unwrap().is_empty());
         assert!(dir.path().join("p/requests/not-hex").exists());
+    }
+
+    #[tokio::test]
+    async fn locations_name_the_object_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = format!("file://{}/b/p", dir.path().display());
+        std::fs::create_dir_all(dir.path().join("b/p")).unwrap();
+        for url in [root.clone(), format!("{root}/")] {
+            let blobs = ObjectBlobs::from_url(&url).unwrap();
+            let key = crate::store::blob::key::BlobKey::result("ab", 3).unwrap();
+            assert_eq!(
+                crate::store::blob::BlobBackend::location(&blobs, &key).unwrap(),
+                format!("{root}/results/ab-3")
+            );
+            let store = BlobStore::new(Arc::new(blobs));
+            let mut w = store.create(&key).await.unwrap();
+            w.write(bytes::Bytes::from_static(b"x")).await.unwrap();
+            w.commit().await.unwrap();
+            assert!(dir.path().join("b/p/results/ab-3").exists());
+        }
     }
 
     #[test]

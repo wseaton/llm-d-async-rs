@@ -21,7 +21,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, WriteTransaction};
 
 use crate::api::request::InternalRequest;
 use crate::boxed::BoxFuture;
-use crate::store::QueueStore;
+use crate::clock::now_millis;
 use crate::store::blob::key::BlobKey;
 use crate::store::blob::{BlobBody, BlobStore};
 use crate::store::embedded::tables::{
@@ -33,6 +33,7 @@ use crate::store::queue::{
     AckOutcome, Admission, Admitted, Applied, Backlog, NewRequest, Outcome, PayloadBody, Peeked,
     ResultClaim,
 };
+use crate::store::{QueueStore, Stamped};
 
 const DB_FILE: &str = "llm-d-async.redb";
 
@@ -311,8 +312,13 @@ impl QueueStore for EmbeddedStore {
         Box::pin(self.depth(route))
     }
 
-    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Option<Vec<u8>>, StoreError>> {
-        Box::pin(self.get_value(key))
+    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Stamped<Option<Vec<u8>>>, StoreError>> {
+        Box::pin(async move {
+            Ok(Stamped {
+                value: self.get_value(key).await?,
+                now_ms: now_millis(),
+            })
+        })
     }
 
     fn kv_put(&self, key: String, value: Option<Vec<u8>>) -> BoxFuture<'_, Result<(), StoreError>> {

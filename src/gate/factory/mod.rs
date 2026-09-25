@@ -552,18 +552,22 @@ mod tests {
             .unwrap();
         let mut held = Releases::default();
         assert_eq!(
-            a.apply(&mut request(&[("userid", "t")]), &mut held).await,
+            a.apply(&mut request(&[("userid", "t")]), &mut held)
+                .await
+                .unwrap(),
             Verdict::Continue
         );
         assert_eq!(
             b.apply(&mut request(&[("userid", "t")]), &mut Releases::default())
-                .await,
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
         assert_eq!(
             other
                 .apply(&mut request(&[("userid", "t")]), &mut Releases::default())
-                .await,
+                .await
+                .unwrap(),
             Verdict::Continue
         );
     }

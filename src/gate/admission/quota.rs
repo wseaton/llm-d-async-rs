@@ -5,9 +5,9 @@ use crate::api::request::InternalRequest;
 use crate::api::routing::Classification;
 use crate::boxed::BoxFuture;
 use crate::gate::admission::GatingMode;
-use crate::gate::admission::counters::Counters;
+use crate::gate::admission::counters::{CounterError, Counters};
 use crate::gate::release::Releases;
-use crate::gate::{Gate, Verdict};
+use crate::gate::{Gate, GateError, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QuotaMode {
@@ -30,8 +30,9 @@ impl QuotaMode {
 /// Classifies each request as within (`reserved`) or over (`overflow`) its
 /// tenant's quota. The tenant is the metadata value under `attribute`;
 /// requests without it are admitted untouched. Gates with the same `prefix`
-/// count against the same per-tenant keys. A counter that cannot be read
-/// counts as overflow.
+/// and `attribute` count against the same per-tenant keys,
+/// `<prefix><attribute>:<tenant>`. A counter that cannot be read is a
+/// [`GateError`].
 pub struct QuotaGate {
     attribute: String,
     prefix: String,
@@ -63,8 +64,12 @@ impl QuotaGate {
         }
     }
 
-    async fn acquire(&self, tenant: &str, releases: &mut Releases) -> Classification {
-        let key = format!("{}{tenant}", self.prefix);
+    async fn acquire(
+        &self,
+        tenant: &str,
+        releases: &mut Releases,
+    ) -> Result<Classification, CounterError> {
+        let key = format!("{}{}:{tenant}", self.prefix, self.attribute);
         let admitted = match self.mode {
             QuotaMode::Concurrency => match self.counters.acquire_slot(key, self.limit).await {
                 Ok(Some(slot)) => {
@@ -76,27 +81,30 @@ impl QuotaGate {
             },
             QuotaMode::RateLimit => self.counters.admit(key, self.limit, self.window).await,
         };
-        match admitted {
-            Ok(true) => Classification::Reserved,
-            Ok(false) => Classification::Overflow,
-            Err(e) => {
-                tracing::warn!(%tenant, error = %e, "quota counter unavailable; treating as overflow");
-                Classification::Overflow
-            }
-        }
+        Ok(if admitted? {
+            Classification::Reserved
+        } else {
+            Classification::Overflow
+        })
     }
 
-    async fn decide(&self, msg: &mut InternalRequest, releases: &mut Releases) -> Verdict {
+    async fn decide(
+        &self,
+        msg: &mut InternalRequest,
+        releases: &mut Releases,
+    ) -> Result<Verdict, GateError> {
         let Some(tenant) = msg.request.metadata.get(&self.attribute).cloned() else {
-            return Verdict::Continue;
+            return Ok(Verdict::Continue);
         };
-        let class = self.acquire(&tenant, releases).await;
+        let class = self.acquire(&tenant, releases).await?;
         msg.routing.set_classification(Some(class));
-        if self.gating == GatingMode::Blocking && class == Classification::Overflow {
-            Verdict::Refuse
-        } else {
-            Verdict::Continue
-        }
+        Ok(
+            if self.gating == GatingMode::Blocking && class == Classification::Overflow {
+                Verdict::Refuse
+            } else {
+                Verdict::Continue
+            },
+        )
     }
 }
 
@@ -109,7 +117,7 @@ impl Gate for QuotaGate {
         &'a self,
         msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
-    ) -> BoxFuture<'a, Verdict> {
+    ) -> BoxFuture<'a, Result<Verdict, GateError>> {
         Box::pin(self.decide(msg, releases))
     }
 }
@@ -149,7 +157,7 @@ mod tests {
         let g = gate(QuotaMode::Concurrency, GatingMode::Blocking, local());
         let mut msg = request(&[("tenant", "a")]);
         assert_eq!(
-            g.decide(&mut msg, &mut Releases::default()).await,
+            g.decide(&mut msg, &mut Releases::default()).await.unwrap(),
             Verdict::Continue
         );
         assert_eq!(msg.routing.classification(), None);
@@ -161,24 +169,29 @@ mod tests {
         let mut held = Releases::default();
         for _ in 0..2 {
             let mut msg = request(&[("userid", "a")]);
-            assert_eq!(g.decide(&mut msg, &mut held).await, Verdict::Continue);
+            assert_eq!(
+                g.decide(&mut msg, &mut held).await.unwrap(),
+                Verdict::Continue
+            );
             assert_eq!(msg.routing.classification(), Some(Classification::Reserved));
         }
         let mut msg = request(&[("userid", "a")]);
         assert_eq!(
-            g.decide(&mut msg, &mut Releases::default()).await,
+            g.decide(&mut msg, &mut Releases::default()).await.unwrap(),
             Verdict::Refuse
         );
         assert_eq!(msg.routing.classification(), Some(Classification::Overflow));
         let mut other = request(&[("userid", "b")]);
         assert_eq!(
-            g.decide(&mut other, &mut Releases::default()).await,
+            g.decide(&mut other, &mut Releases::default())
+                .await
+                .unwrap(),
             Verdict::Continue
         );
         drop(held);
         let mut msg = request(&[("userid", "a")]);
         assert_eq!(
-            g.decide(&mut msg, &mut Releases::default()).await,
+            g.decide(&mut msg, &mut Releases::default()).await.unwrap(),
             Verdict::Continue
         );
     }
@@ -193,7 +206,10 @@ mod tests {
             Classification::Overflow,
         ] {
             let mut msg = request(&[("userid", "a")]);
-            assert_eq!(g.decide(&mut msg, &mut held).await, Verdict::Continue);
+            assert_eq!(
+                g.decide(&mut msg, &mut held).await.unwrap(),
+                Verdict::Continue
+            );
             assert_eq!(msg.routing.classification(), Some(want));
         }
     }
@@ -203,15 +219,21 @@ mod tests {
         let g = gate(QuotaMode::RateLimit, GatingMode::Blocking, local());
         let mut r = Releases::default();
         assert_eq!(
-            g.decide(&mut request(&[("userid", "a")]), &mut r).await,
+            g.decide(&mut request(&[("userid", "a")]), &mut r)
+                .await
+                .unwrap(),
             Verdict::Continue
         );
         assert_eq!(
-            g.decide(&mut request(&[("userid", "a")]), &mut r).await,
+            g.decide(&mut request(&[("userid", "a")]), &mut r)
+                .await
+                .unwrap(),
             Verdict::Continue
         );
         assert_eq!(
-            g.decide(&mut request(&[("userid", "a")]), &mut r).await,
+            g.decide(&mut request(&[("userid", "a")]), &mut r)
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
         assert!(r.is_empty());
@@ -231,11 +253,16 @@ mod tests {
             Arc::clone(&counters),
         );
         let mut held = Releases::default();
-        a.decide(&mut request(&[("userid", "t")]), &mut held).await;
-        b.decide(&mut request(&[("userid", "t")]), &mut held).await;
+        a.decide(&mut request(&[("userid", "t")]), &mut held)
+            .await
+            .unwrap();
+        b.decide(&mut request(&[("userid", "t")]), &mut held)
+            .await
+            .unwrap();
         assert_eq!(
             a.decide(&mut request(&[("userid", "t")]), &mut Releases::default())
-                .await,
+                .await
+                .unwrap(),
             Verdict::Refuse
         );
         let other_prefix = QuotaGate::new(
@@ -250,8 +277,89 @@ mod tests {
         assert_eq!(
             other_prefix
                 .decide(&mut request(&[("userid", "t")]), &mut Releases::default())
-                .await,
+                .await
+                .unwrap(),
             Verdict::Continue
         );
+    }
+
+    #[tokio::test]
+    async fn gates_with_one_prefix_and_different_attributes_count_apart() {
+        let counters = local();
+        let by_user = gate(
+            QuotaMode::Concurrency,
+            GatingMode::Blocking,
+            Arc::clone(&counters),
+        );
+        let by_team = QuotaGate::new(
+            "team".into(),
+            "quota:".into(),
+            QuotaMode::Concurrency,
+            GatingMode::Blocking,
+            2,
+            Duration::from_secs(10),
+            Arc::clone(&counters),
+        );
+        let mut held = Releases::default();
+        for _ in 0..2 {
+            by_user
+                .decide(&mut request(&[("userid", "x")]), &mut held)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            by_user
+                .decide(&mut request(&[("userid", "x")]), &mut Releases::default())
+                .await
+                .unwrap(),
+            Verdict::Refuse
+        );
+        assert_eq!(
+            by_team
+                .decide(&mut request(&[("team", "x")]), &mut Releases::default())
+                .await
+                .unwrap(),
+            Verdict::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_counter_is_a_gate_error_through_every_combinator() {
+        use std::sync::atomic::Ordering;
+
+        use crate::gate::combinator::composite::CompositeGate;
+        use crate::gate::combinator::wait_on_refuse::WaitOnRefuseGate;
+        use crate::gate::test_support::FixedGate;
+        use crate::gate::{Gate, GateError, SharedGate};
+
+        let Some(f) = crate::store::postgres::test_support::fixture().await else {
+            return;
+        };
+        let quota: SharedGate = Arc::new(gate(
+            QuotaMode::Concurrency,
+            GatingMode::Classifying,
+            Arc::new(f.pg.counters()),
+        ));
+        f.db.pool.close();
+
+        let mut msg = request(&[("userid", "a")]);
+        let failed = quota.apply(&mut msg, &mut Releases::default()).await;
+        assert!(matches!(failed, Err(GateError::Counter(_))), "{failed:?}");
+        assert_eq!(msg.routing.classification(), None, "not classified");
+
+        let waiting = WaitOnRefuseGate::new(Arc::clone(&quota));
+        let failed = waiting
+            .apply(&mut request(&[("userid", "a")]), &mut Releases::default())
+            .await;
+        assert!(failed.is_err(), "{failed:?}");
+
+        let before = Arc::new(FixedGate::new(1.0, Verdict::Continue));
+        let chain = CompositeGate::new(vec![before.clone(), quota]);
+        let mut releases = Releases::default();
+        let failed = chain
+            .apply(&mut request(&[("userid", "a")]), &mut releases)
+            .await;
+        assert!(failed.is_err(), "{failed:?}");
+        assert_eq!(before.held.load(Ordering::SeqCst), 0, "chain released");
     }
 }
