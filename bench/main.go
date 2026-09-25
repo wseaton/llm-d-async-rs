@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,7 +38,8 @@ type options struct {
 	batchSize      int
 	pollIntervalMs int
 	concurrency    int
-	payloadBytes   int
+	isl            int
+	osl            int
 	gatewayDelay   time.Duration
 	timeout        time.Duration
 	binRust        string
@@ -61,7 +63,8 @@ func parseOptions() (options, error) {
 	flag.IntVar(&o.batchSize, "batch-size", 100, "requests a queue claims per poll")
 	flag.IntVar(&o.pollIntervalMs, "poll-interval-ms", 50, "how often each queue polls")
 	flag.IntVar(&o.concurrency, "concurrency", 256, "workers per replica")
-	flag.IntVar(&o.payloadBytes, "payload-bytes", 1024, "prompt size per request")
+	flag.IntVar(&o.isl, "isl", 256, "input sequence length: prompt tokens per request (4 bytes each)")
+	flag.IntVar(&o.osl, "osl", 16, "output sequence length: completion tokens per response (4 bytes each)")
 	flag.DurationVar(&o.gatewayDelay, "gateway-delay", 0, "how long the gateway takes to answer")
 	flag.DurationVar(&o.timeout, "timeout", 10*time.Minute, "give up on a run after this long")
 	flag.StringVar(&o.binRust, "bin-rust", filepath.Join(here, "llm-d-async-rs"), "Rust processor binary")
@@ -120,7 +123,8 @@ type report struct {
 	BatchSize      int      `json:"batch_size"`
 	PollIntervalMs int      `json:"poll_interval_ms"`
 	Concurrency    int      `json:"concurrency"`
-	PayloadBytes   int      `json:"payload_bytes"`
+	ISL            int      `json:"isl"`
+	OSL            int      `json:"osl"`
 	GatewayDelayMs float64  `json:"gateway_delay_ms"`
 	// ConfigCeiling is the rate the poll settings allow at most:
 	// queues x replicas x batch / interval.
@@ -142,6 +146,10 @@ type report struct {
 	LateTicks   int64     `json:"late_ticks,omitempty"`
 	FailedSubs  int64     `json:"failed_submits,omitempty"`
 	LagMs       *quantile `json:"dispatch_lag_ms,omitempty"`
+	// ResultLatencyMs runs from sending a request to a producer reading
+	// its result.
+	ResultLatencyMs  *quantile `json:"result_latency_ms,omitempty"`
+	ResultDuplicates int64     `json:"result_duplicates,omitempty"`
 
 	DB              perRequestDB `json:"db"`
 	CPUSecs         float64      `json:"cpu_s"`
@@ -196,6 +204,13 @@ func perRequest(d dbStats, n int64) perRequestDB {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "summarize" {
+		if err := summarize(os.Args[2], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "bench:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	o, err := parseOptions()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -221,7 +236,7 @@ func run(ctx context.Context, o options) (report, error) {
 		Impl: o.impl, Mode: o.mode, Started: started.UTC().Format(time.RFC3339),
 		Queues: o.queues, Replicas: o.replicas, BatchSize: o.batchSize,
 		PollIntervalMs: o.pollIntervalMs, Concurrency: o.concurrency,
-		PayloadBytes: o.payloadBytes, GatewayDelayMs: float64(o.gatewayDelay) / 1e6,
+		ISL: o.isl, OSL: o.osl, GatewayDelayMs: float64(o.gatewayDelay) / 1e6,
 		ConfigCeiling: float64(o.queues*o.replicas*o.batchSize) * 1000 / float64(o.pollIntervalMs),
 	}
 	runDir := filepath.Join(filepath.Dir(o.out), fmt.Sprintf("%s-%s-%d", o.impl, o.mode, started.Unix()))
@@ -243,7 +258,7 @@ func run(ctx context.Context, o options) (report, error) {
 		defer adm.dropDatabase(context.Background(), dbName) //nolint:errcheck // Best effort.
 	}
 
-	gw, err := startGateway(o.gatewayDelay)
+	gw, err := startGateway(o.gatewayDelay, completion(o.isl, o.osl))
 	if err != nil {
 		return r, err
 	}
@@ -253,7 +268,7 @@ func run(ctx context.Context, o options) (report, error) {
 		DBURL: dbURL, GatewayURL: gw.url, Queues: o.queueNames(),
 		BatchSize: o.batchSize, PollIntervalMs: o.pollIntervalMs, Concurrency: o.concurrency,
 	}
-	factory := newFactory(o.payloadBytes, time.Hour)
+	factory := newFactory(o.isl, time.Hour)
 
 	if o.mode == "drain" {
 		if err := preloadFor(ctx, o, cfg, factory, runDir); err != nil {
@@ -271,6 +286,9 @@ func run(ctx context.Context, o options) (report, error) {
 	}
 	defer results.Close(context.Background()) //nolint:errcheck // End of run.
 
+	if _, err := adm.conn.Exec(ctx, "CHECKPOINT"); err != nil {
+		return r, fmt.Errorf("checkpoint: %w", err)
+	}
 	before, err := adm.snapshot(ctx, dbName)
 	if err != nil {
 		return r, err
@@ -298,32 +316,48 @@ func run(ctx context.Context, o options) (report, error) {
 		procs = append(procs, p)
 	}
 
+	var got consumed
 	if o.mode == "rate" {
-		sub, err := submitterFor(ctx, o.impl, procs[0], dbURL, cfg.Queues)
+		sub, reader, workers, err := loadFor(ctx, o.impl, procs[0], dbURL, cfg.Queues)
 		if err != nil {
 			return r, err
 		}
-		off := openLoop(ctx, sub, factory, cfg.Queues, o.rate, o.duration, 256)
-		sub.close()
+		defer sub.close()
+		sent := &sync.Map{}
+		readCtx, stopReading := context.WithCancel(ctx)
+		readers := consume(readCtx, reader, workers, sent, &got)
+		defer func() {
+			stopReading()
+			readers.Wait()
+		}()
+		off := openLoop(ctx, sub, factory, cfg.Queues, o.rate, o.duration, 256, sent)
 		r.Requests = off.Submitted
 		r.OfferedRate = float64(off.Submitted) / off.Elapsed.Seconds()
 		r.LateTicks, r.FailedSubs = off.LateTicks, off.Failed
 	}
 
 	deadline := time.Now().Add(o.timeout)
+	for gw.stats().Unique < int(r.Requests) {
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return r, fmt.Errorf("gave up: %d of %d dispatched (logs in %s)", gw.stats().Unique, r.Requests, runDir)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	for {
-		n, err := countResults(ctx, results, o.impl)
-		if err != nil {
-			return r, err
+		n := got.count()
+		if o.mode == "drain" {
+			if n, err = countResults(ctx, results, o.impl); err != nil {
+				return r, err
+			}
 		}
 		r.Results = n
-		if gw.stats().Unique >= int(r.Requests) && n >= r.Requests {
+		if n >= r.Requests {
 			break
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			return r, fmt.Errorf("gave up: %d of %d dispatched, %d results (logs in %s)", gw.stats().Unique, r.Requests, n, runDir)
+			return r, fmt.Errorf("gave up: %d of %d results (logs in %s)", n, r.Requests, runDir)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	if o.mode == "drain" {
 		r.TotalSeconds = time.Since(coldStart).Seconds()
@@ -350,6 +384,10 @@ func run(ctx context.Context, o options) (report, error) {
 	}
 	if o.mode == "rate" {
 		r.LagMs = quantiles(g.LagsMs)
+		got.mu.Lock()
+		r.ResultLatencyMs = quantiles(got.latencies)
+		r.ResultDuplicates = got.duplicates
+		got.mu.Unlock()
 	}
 	r.DB = perRequest(after.minus(before), r.Requests)
 	r.CPUSecs, r.MaxRSSMiB = u.CPUSeconds, u.MaxRSSMiB
@@ -414,11 +452,22 @@ func putBudget(ctx context.Context, api, key string, value float64) error {
 	return nil
 }
 
-func submitterFor(ctx context.Context, k implKind, p *processor, dbURL string, queues []string) (submitter, error) {
+// loadFor is how a rate run submits requests and reads results, and how
+// many readers it runs: one result per Rust pop, a batch per Go pop.
+func loadFor(ctx context.Context, k implKind, p *processor, dbURL string, queues []string) (submitter, resultReader, int, error) {
 	if k == implRust {
-		return newRustSubmitter(p.api)
+		sub, err := newRustSubmitter(p.api)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		reader, err := newRustReader(p.api)
+		return sub, reader, 16, err
 	}
-	return newGoSubmitter(ctx, dbURL, queues)
+	sub, err := newGoSubmitter(ctx, dbURL, queues)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return sub, sub.reader(queues[0]), 4, nil
 }
 
 func countResults(ctx context.Context, conn *pgx.Conn, k implKind) (int64, error) {
@@ -446,8 +495,8 @@ func timeline(per map[int64]int) []int {
 }
 
 func printReport(r report) {
-	fmt.Printf("%s %s: %d queues x %d replicas, batch %d every %dms (ceiling %.0f/s), %d workers, %dB payload\n",
-		r.Impl, r.Mode, r.Queues, r.Replicas, r.BatchSize, r.PollIntervalMs, r.ConfigCeiling, r.Concurrency, r.PayloadBytes)
+	fmt.Printf("%s %s: %d queues x %d replicas, batch %d every %dms (ceiling %.0f/s), %d workers, ISL %d OSL %d\n",
+		r.Impl, r.Mode, r.Queues, r.Replicas, r.BatchSize, r.PollIntervalMs, r.ConfigCeiling, r.Concurrency, r.ISL, r.OSL)
 	fmt.Printf("  requests %d, dispatched %d (%d duplicates), results %d\n", r.Requests, r.Dispatched, r.Duplicates, r.Results)
 	if r.Mode == "drain" {
 		fmt.Printf("  drain: %.2fs cold start to last result; dispatch %.0f/s over %.2fs, peak second %d\n",
@@ -456,6 +505,9 @@ func printReport(r report) {
 		fmt.Printf("  offered %.0f/s (%d late ticks, %d failed); dispatched %.0f/s\n", r.OfferedRate, r.LateTicks, r.FailedSubs, r.DispatchRate)
 		if r.LagMs != nil {
 			fmt.Printf("  dispatch lag ms: p50 %.1f  p90 %.1f  p99 %.1f  max %.1f\n", r.LagMs.P50, r.LagMs.P90, r.LagMs.P99, r.LagMs.Max)
+		}
+		if q := r.ResultLatencyMs; q != nil {
+			fmt.Printf("  result latency ms: p50 %.1f  p90 %.1f  p99 %.1f  max %.1f (%d duplicate results)\n", q.P50, q.P90, q.P99, q.Max, r.ResultDuplicates)
 		}
 	}
 	fmt.Printf("  per request: %.2f xacts, %.2f rows written, %.0f WAL bytes", r.DB.Transactions, r.DB.RowsWritten, r.DB.WALBytes)

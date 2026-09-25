@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +25,7 @@ type marker struct {
 type gateway struct {
 	url   string
 	delay time.Duration
+	reply []byte
 	srv   *http.Server
 	hits  atomic.Int64
 
@@ -35,9 +38,38 @@ type gateway struct {
 	perSecond  map[int64]int
 }
 
-var reply = []byte(`{"id":"bench","object":"text_completion","choices":[{"index":0,"text":"ok","finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+// text is n tokens of seeded random three-letter words, 4 bytes a token.
+// Random letters keep Postgres from compressing bodies to nothing, as it
+// would a repeated word.
+func text(n int, seed uint64) string {
+	r := rand.New(rand.NewPCG(seed, seed))
+	var b strings.Builder
+	b.Grow(4 * n)
+	for range n {
+		for range 3 {
+			b.WriteByte(byte('a' + r.IntN(26)))
+		}
+		b.WriteByte(' ')
+	}
+	return b.String()
+}
 
-func startGateway(delay time.Duration) (*gateway, error) {
+// completion is a text completion of osl tokens for a prompt of isl.
+func completion(isl, osl int) []byte {
+	body, _ := json.Marshal(map[string]any{ //nolint:errchkjson // Plain maps of strings and ints.
+		"id":     "bench",
+		"object": "text_completion",
+		"choices": []map[string]any{{
+			"index": 0, "text": text(osl, 2), "finish_reason": "stop",
+		}},
+		"usage": map[string]int{
+			"prompt_tokens": isl, "completion_tokens": osl, "total_tokens": isl + osl,
+		},
+	})
+	return body
+}
+
+func startGateway(delay time.Duration, reply []byte) (*gateway, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -45,6 +77,7 @@ func startGateway(delay time.Duration) (*gateway, error) {
 	g := &gateway{
 		url:       "http://" + ln.Addr().String(),
 		delay:     delay,
+		reply:     reply,
 		seen:      make(map[string]int),
 		perSecond: make(map[int64]int),
 	}
@@ -85,7 +118,7 @@ func (g *gateway) handle(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(g.delay)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(reply) //nolint:errcheck // The processor sees a short body as an error.
+	w.Write(g.reply) //nolint:errcheck // The processor sees a short body as an error.
 }
 
 // gatewayStats is a copy of what the gateway recorded.

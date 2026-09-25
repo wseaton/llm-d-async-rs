@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,6 +70,7 @@ func newGoSubmitter(ctx context.Context, dbURL string, queues []string) (*goSubm
 		p, err := producersql.New(ctx, producersql.Config{
 			RequestQueueName: q,
 			ResultQueueName:  resultQueue,
+			PollInterval:     resultPollInterval,
 		}, producersql.WithStore(store))
 		if err != nil {
 			store.Close()
@@ -115,8 +115,8 @@ func (f requestFactory) batch(from, count int, stamped bool) []api.Request {
 	return reqs
 }
 
-func newFactory(payloadBytes int, deadline time.Duration) requestFactory {
-	return requestFactory{prompt: strings.Repeat("x", payloadBytes), deadline: deadline}
+func newFactory(isl int, deadline time.Duration) requestFactory {
+	return requestFactory{prompt: text(isl, 1), deadline: deadline}
 }
 
 // preload submits n requests spread across queues in chunks of chunk, with
@@ -166,7 +166,7 @@ type offered struct {
 
 // openLoop submits rate requests per second for duration, in one batch per
 // tick, whether or not earlier batches have finished (up to maxInFlight).
-func openLoop(ctx context.Context, s submitter, f requestFactory, queues []string, rate int, duration time.Duration, maxInFlight int) offered {
+func openLoop(ctx context.Context, s submitter, f requestFactory, queues []string, rate int, duration time.Duration, maxInFlight int, sent *sync.Map) offered {
 	const tick = 10 * time.Millisecond
 	perTick := float64(rate) * tick.Seconds()
 	var (
@@ -199,6 +199,10 @@ loop:
 			continue
 		}
 		reqs := f.batch(next, count, true)
+		at := time.Now()
+		for _, r := range reqs {
+			sent.Store(r.ReqID(), at)
+		}
 		next += count
 		queue := queues[ticks%len(queues)]
 		ticks++
@@ -222,4 +226,104 @@ loop:
 	wg.Wait()
 	out.Submitted, out.Failed, out.Elapsed = sub.Load(), failed.Load(), time.Since(start)
 	return out
+}
+
+// resultPollInterval is how often a reader that found no result asks again.
+const resultPollInterval = 10 * time.Millisecond
+
+// resultReader takes finished results off the result queue, as a producer
+// does, and returns their request IDs.
+type resultReader interface {
+	read(ctx context.Context) ([]string, error)
+}
+
+// rustReader long-polls the Rust processor for one result at a time.
+type rustReader struct {
+	client *asyncclient.Client
+}
+
+func newRustReader(apiURL string) (*rustReader, error) {
+	c, err := asyncclient.New(apiURL,
+		asyncclient.WithResultQueue(resultQueue),
+		asyncclient.WithPollWait(time.Second))
+	if err != nil {
+		return nil, err
+	}
+	return &rustReader{client: c}, nil
+}
+
+func (r *rustReader) read(ctx context.Context) ([]string, error) {
+	res, err := r.client.PopResult(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []string{res.ID}, nil
+}
+
+// goReader pops batches through the Go producer.
+type goReader struct {
+	producer *producersql.Producer
+}
+
+func (s *goSubmitter) reader(queue string) *goReader {
+	return &goReader{producer: s.producers[queue]}
+}
+
+func (r *goReader) read(ctx context.Context) ([]string, error) {
+	results, err := r.producer.GetResults(ctx, 256)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(results))
+	for i, res := range results {
+		ids[i] = res.ID
+	}
+	return ids, nil
+}
+
+// consumed is what result readers have taken so far.
+type consumed struct {
+	mu         sync.Mutex
+	n          int64
+	duplicates int64
+	latencies  []float64
+}
+
+func (c *consumed) count() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// consume runs workers readers until ctx ends, timing each result from
+// when its request was sent.
+func consume(ctx context.Context, r resultReader, workers int, sent *sync.Map, c *consumed) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				ids, err := r.read(ctx)
+				if err != nil {
+					continue
+				}
+				now := time.Now()
+				c.mu.Lock()
+				for _, id := range ids {
+					at, ok := sent.LoadAndDelete(id)
+					if !ok {
+						c.duplicates++
+						continue
+					}
+					if t, ok := at.(time.Time); ok {
+						c.latencies = append(c.latencies, float64(now.Sub(t))/1e6)
+					}
+					c.n++
+				}
+				c.mu.Unlock()
+			}
+		}()
+	}
+	return &wg
 }
