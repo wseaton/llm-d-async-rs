@@ -1,0 +1,34 @@
+[project]
+name = "llm-d-async-client"
+version = "0.1.0"
+description = "Client for the llm-d-async processor's HTTP API"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = ["httpx2>=2.13"]
+
+[dependency-groups]
+dev = ["pytest>=8.4", "anyio>=4.10", "ruff>=0.13", "pyright>=1.1.405"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "llm_d_async"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+pythonVersion = "3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

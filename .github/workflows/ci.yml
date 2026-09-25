@@ -34,6 +34,16 @@ jobs:
       - run: cargo clippy --all --benches --tests --examples --all-features -- -D warnings
       - run: cargo test --lib
       - run: cargo test --test e2e
+      - uses: astral-sh/setup-uv@v6
+      - name: python client
+        working-directory: clients/python
+        run: |
+          cargo build
+          uv sync --locked
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run pyright
+          uv run pytest
       - uses: actions/setup-go@v5
         with:
           go-version-file: clients/go/go.mod
