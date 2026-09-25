@@ -63,7 +63,12 @@ impl Admission {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admitted {
-    Claimed(ClaimRef),
+    /// `payload` is the request body when it is stored inline; a body in a
+    /// blob is opened at dispatch with `open_payload`.
+    Claimed {
+        claim: ClaimRef,
+        payload: Option<Bytes>,
+    },
     Finished,
     /// The row left the queue, or this process lost the right to take it,
     /// before this admission ran.

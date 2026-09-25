@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytes::Bytes;
+
 use crate::api::request::InternalRequest;
 use crate::dispatch::claim::ClaimGuard;
 use crate::gate::release::Releases;
@@ -14,6 +16,8 @@ pub struct Claimed {
     /// Queue-gate reservations, held until the request finishes or requeues.
     pub releases: Releases,
     pub ingested: Instant,
+    /// The request body, when it is stored inline and came with the claim.
+    pub payload: Option<Bytes>,
 }
 
 /// Where a queue's requests go.

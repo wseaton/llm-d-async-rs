@@ -335,7 +335,11 @@ impl EmbeddedStore {
                                     generation.as_str(),
                                     serde_json::to_string(&record)?.as_str(),
                                 )?;
-                                out.push(Admitted::Claimed(claim));
+                                let payload = t
+                                    .payloads
+                                    .get(generation.as_str())?
+                                    .map(|v| Bytes::copy_from_slice(v.value()));
+                                out.push(Admitted::Claimed { claim, payload });
                             }
                             Admission::Finish {
                                 envelope, result, ..

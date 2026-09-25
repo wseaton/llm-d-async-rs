@@ -11,6 +11,7 @@ use crate::boxed::BoxFuture;
 use crate::clock::now_millis;
 use crate::store::blob::key::BlobKey;
 use crate::store::blob::{BlobBackend, BlobBody, BlobError, BlobUpload, Listed};
+use crate::store::postgres::cached::Cached;
 
 const CHUNK: usize = 1 << 20;
 const READ_AHEAD: usize = 2;
@@ -29,8 +30,8 @@ impl PostgresBlobs {
     async fn insert(&self, key: &str, idx: i32, data: &[u8]) -> Result<(), BlobError> {
         let client = self.pool.get().await?;
         client
-            .execute(
-                "INSERT INTO lda_blob_chunks (key, idx, data, written_ms) VALUES ($1, $2, $3, $4)
+            .execute_cached(
+"INSERT INTO lda_blob_chunks (key, idx, data, written_ms) VALUES ($1, $2, $3, $4)
                  ON CONFLICT (key, idx) DO UPDATE SET data = EXCLUDED.data, written_ms = EXCLUDED.written_ms",
                 &[&key, &idx, &data, &now_millis()],
             )
@@ -41,7 +42,7 @@ impl PostgresBlobs {
     async fn delete(&self, key: &str) -> Result<(), BlobError> {
         let client = self.pool.get().await?;
         client
-            .execute("DELETE FROM lda_blob_chunks WHERE key = $1", &[&key])
+            .execute_cached("DELETE FROM lda_blob_chunks WHERE key = $1", &[&key])
             .await?;
         Ok(())
     }
@@ -66,7 +67,7 @@ impl BlobBackend for PostgresBlobs {
         Box::pin(async move {
             let client = self.pool.get().await?;
             let row = client
-                .query_one(
+                .query_one_cached(
                     "SELECT count(*)::int4, coalesce(sum(octet_length(data)), 0)::int8
                      FROM lda_blob_chunks WHERE key = $1",
                     &[&key],
@@ -104,7 +105,7 @@ impl BlobBackend for PostgresBlobs {
         Box::pin(async move {
             let client = self.pool.get().await?;
             let rows = client
-                .query(
+                .query_cached(
                     "SELECT key, max(written_ms) FROM lda_blob_chunks
                      GROUP BY key HAVING max(written_ms) <= $1",
                     &[&cutoff_ms],
@@ -127,7 +128,7 @@ impl BlobBackend for PostgresBlobs {
 async fn read_chunk(pool: &Pool, key: &str, idx: i32) -> Result<Bytes, BlobError> {
     let client = pool.get().await?;
     let row = client
-        .query_one(
+        .query_one_cached(
             "SELECT data FROM lda_blob_chunks WHERE key = $1 AND idx = $2",
             &[&key, &idx],
         )

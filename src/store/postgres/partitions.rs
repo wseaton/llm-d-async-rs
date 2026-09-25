@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::store::error::StoreError;
+use crate::store::postgres::cached::Cached;
 use crate::store::postgres::requests::RELEASE;
 use crate::store::postgres::{DB_NOW_MS, Inner};
 
@@ -309,7 +310,7 @@ impl Inner {
     async fn seed(&self, queue: &str) -> Result<(), StoreError> {
         let client = self.control.get().await?;
         client
-            .execute(
+            .execute_cached(
                 "INSERT INTO lda_partitions (queue, partition_id)
                  SELECT $1, g FROM generate_series(0, $2 - 1) AS g
                  ON CONFLICT (queue, partition_id) DO NOTHING",
@@ -327,8 +328,8 @@ impl Inner {
         let mut client = self.control.get().await?;
         let txn = client.transaction().await?;
         if member {
-            txn.execute(
-                &format!(
+            txn.execute_cached(
+&format!(
                     "INSERT INTO lda_dispatchers (queue, owner, expires_ms) VALUES ($1, $2, {DB_NOW_MS} + $3)
                      ON CONFLICT (queue, owner) DO UPDATE SET expires_ms = EXCLUDED.expires_ms"
                 ),
@@ -336,26 +337,26 @@ impl Inner {
             )
             .await?;
         } else {
-            txn.execute(
+            txn.execute_cached(
                 "DELETE FROM lda_dispatchers WHERE queue = $1 AND owner = $2",
                 &[&queue, &self.owner],
             )
             .await?;
         }
-        txn.execute(
+        txn.execute_cached(
             &format!("DELETE FROM lda_dispatchers WHERE queue = $1 AND expires_ms < {DB_NOW_MS}"),
             &[&queue],
         )
         .await?;
         let members: i64 = txn
-            .query_one(
+            .query_one_cached(
                 "SELECT count(*) FROM lda_dispatchers WHERE queue = $1",
                 &[&queue],
             )
             .await?
             .get(0);
         let rows = txn
-            .query(
+            .query_cached(
                 &format!(
                     "UPDATE lda_partitions SET lease_expires_ms = {DB_NOW_MS} + $3
                      WHERE queue = $1 AND owner = $2
@@ -373,7 +374,7 @@ impl Inner {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let client = self.control.get().await?;
         let rows = client
-            .query(
+            .query_cached(
                 &format!(
                     "WITH picked AS MATERIALIZED (
                         SELECT partition_id FROM lda_partitions
@@ -404,7 +405,7 @@ impl Inner {
         let parts: Vec<i32> = only.map(<[i32]>::to_vec).unwrap_or_default();
         let client = self.control.get().await?;
         client
-            .execute(
+            .execute_cached(
                 "WITH stale AS MATERIALIZED (
                     SELECT r.seq FROM lda_requests r
                     JOIN lda_partitions p ON p.queue = r.queue AND p.partition_id = r.partition_id
@@ -432,7 +433,7 @@ impl Inner {
         }
         let client = self.control.get().await?;
         client
-            .execute(
+            .execute_cached(
                 "UPDATE lda_partitions SET draining = $3
                  WHERE queue = $1 AND owner = $2 AND partition_id = ANY($4)",
                 &[&queue, &self.owner, &draining, &parts],
@@ -461,7 +462,7 @@ impl Inner {
         }
         let client = self.control.get().await?;
         client
-            .execute(
+            .execute_cached(
                 "UPDATE lda_partitions SET owner = '', draining = false, lease_expires_ms = 0
                  WHERE queue = $1 AND owner = $2 AND partition_id = ANY($3)",
                 &[&queue, &self.owner, &release],
@@ -480,7 +481,7 @@ impl Inner {
     async fn reconcile(&self, queue: &str) -> Result<(), StoreError> {
         let client = self.control.get().await?;
         let rows = client
-            .query(
+            .query_cached(
                 "SELECT r.id, r.request_token, r.dispatch_attempt FROM lda_requests r
                  JOIN lda_partitions p ON p.queue = r.queue AND p.partition_id = r.partition_id
                  WHERE r.queue = $1 AND r.dispatch_epoch > 0 AND p.owner = $2
@@ -508,7 +509,7 @@ impl Inner {
             let (tokens, attempts): (Vec<String>, Vec<i64>) = rest.into_iter().unzip();
             tracing::warn!(%queue, requests = ids.len(), "returning claims this process lost track of");
             client
-                .execute(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
+                .execute_cached(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
                 .await?;
         }
         self.with_queue(queue, |q, _| q.reconcile = false)?;
@@ -535,13 +536,13 @@ impl Inner {
     pub(crate) async fn leave_queue(&self, queue: &str) -> Result<(), StoreError> {
         let mut client = self.control.get().await?;
         let txn = client.transaction().await?;
-        txn.execute(
+        txn.execute_cached(
             "UPDATE lda_partitions SET owner = '', draining = false, lease_expires_ms = 0
              WHERE queue = $1 AND owner = $2",
             &[&queue, &self.owner],
         )
         .await?;
-        txn.execute(
+        txn.execute_cached(
             "DELETE FROM lda_dispatchers WHERE queue = $1 AND owner = $2",
             &[&queue, &self.owner],
         )

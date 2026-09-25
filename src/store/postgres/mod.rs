@@ -7,6 +7,7 @@
 //! nothing. Admission counters live here too (see [`counters`]), so quota
 //! limits hold across replicas.
 
+pub(crate) mod cached;
 mod cancel_checks;
 pub mod connect;
 pub mod counters;
@@ -32,6 +33,7 @@ use crate::boxed::BoxFuture;
 use crate::store::blob::key::BlobKey;
 use crate::store::blob::{BlobBody, BlobStore};
 use crate::store::error::StoreError;
+use crate::store::postgres::cached::Cached;
 use crate::store::postgres::cancel_checks::CancelChecks;
 use crate::store::postgres::connect::Database;
 use crate::store::postgres::counters::PgCounters;
@@ -166,7 +168,7 @@ impl QueueStore for PgStore {
     fn ping(&self) -> BoxFuture<'_, Result<(), StoreError>> {
         Box::pin(async move {
             let client = self.inner.pool.get().await?;
-            client.execute("SELECT 1", &[]).await?;
+            client.execute_cached("SELECT 1", &[]).await?;
             Ok(())
         })
     }
@@ -398,7 +400,7 @@ mod tests {
             .into_iter()
             .zip(admitted)
             .filter_map(|(p, a)| match a {
-                Admitted::Claimed(c) => Some((p, c)),
+                Admitted::Claimed { claim, .. } => Some((p, claim)),
                 _ => None,
             })
             .collect()

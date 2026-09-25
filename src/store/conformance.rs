@@ -25,6 +25,7 @@ macro_rules! conformance_tests {
             peek_orders_by_deadline_then_submission,
             peek_reports_cancellation,
             claim_removes_from_queue_and_payload_stays_readable,
+            a_claim_carries_an_inline_body_but_not_a_blob,
             admitting_a_row_twice_reports_gone,
             finish_at_admission_writes_a_result,
             discard_removes_the_row_and_its_blob,
@@ -83,7 +84,7 @@ async fn claim_head(store: &Store, queue: &str) -> (Peeked, ClaimRef) {
         )
         .await
         .unwrap();
-    let Some(Admitted::Claimed(claim)) = admitted.into_iter().next() else {
+    let Some(Admitted::Claimed { claim, .. }) = admitted.into_iter().next() else {
         panic!("not claimed")
     };
     (head, claim)
@@ -135,6 +136,39 @@ async fn write_blob(store: &Store, key: &BlobKey, body: &'static [u8]) -> Stored
         size: digest.size,
         sha256: digest.sha256,
     }
+}
+
+pub async fn a_claim_carries_an_inline_body_but_not_a_blob(store: Store) {
+    let inline = new_request("small", "q", 100);
+    let blob = blob_request(&store, "large", "0a", b"0123456789").await;
+    store.submit(vec![inline, blob]).await.unwrap();
+    store.join("q").await.unwrap();
+    let peeked = store.peek("q".into(), 10, NOW_MS).await.unwrap();
+    let ids: Vec<String> = peeked
+        .iter()
+        .map(|p| p.envelope.as_ref().unwrap().request.id.clone())
+        .collect();
+    let admissions = peeked
+        .iter()
+        .map(|p| Admission::Claim {
+            key: p.key,
+            generation: p.envelope.as_ref().unwrap().generation_key(),
+        })
+        .collect();
+    let admitted = store.admit("q".into(), admissions, NOW_MS).await.unwrap();
+    let payloads: std::collections::BTreeMap<String, Option<Bytes>> = ids
+        .into_iter()
+        .zip(admitted)
+        .map(|(id, a)| match a {
+            Admitted::Claimed { payload, .. } => (id, payload),
+            other => panic!("{id} not claimed: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        payloads["small"].as_deref(),
+        Some(br#"{"prompt":"small"}"#.as_slice())
+    );
+    assert_eq!(payloads["large"], None, "a blob body is opened at dispatch");
 }
 
 pub async fn peek_orders_by_deadline_then_submission(store: Store) {

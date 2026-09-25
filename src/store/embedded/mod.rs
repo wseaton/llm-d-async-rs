@@ -411,7 +411,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let Some(Admitted::Claimed(claim)) = out.into_iter().next() else {
+        let Some(Admitted::Claimed { claim, .. }) = out.into_iter().next() else {
             panic!("not claimed")
         };
         claim

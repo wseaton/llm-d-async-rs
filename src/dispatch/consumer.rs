@@ -216,12 +216,15 @@ impl Consumer {
             .into_iter()
             .zip(requests)
             .filter_map(|(outcome, request)| match (outcome, request) {
-                (Admitted::Claimed(claim), Some((envelope, releases))) => Some(Claimed {
-                    envelope,
-                    guard: ClaimGuard::new(claim, self.outcomes.clone()),
-                    releases,
-                    ingested: Instant::now(),
-                }),
+                (Admitted::Claimed { claim, payload }, Some((envelope, releases))) => {
+                    Some(Claimed {
+                        envelope,
+                        guard: ClaimGuard::new(claim, self.outcomes.clone()),
+                        releases,
+                        ingested: Instant::now(),
+                        payload,
+                    })
+                }
                 _ => None,
             })
             .collect();

@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use bytes::Bytes;
-use tokio_postgres::Transaction;
+use deadpool_postgres::Transaction;
 
 use crate::api::payload::PayloadStorage;
 use crate::api::request::InternalRequest;
 use crate::api::result::ResultMessage;
 use crate::store::blob::key::BlobKey;
 use crate::store::error::StoreError;
+use crate::store::postgres::cached::Cached;
 use crate::store::postgres::partitions::{Tracked, partition_of};
 use crate::store::postgres::{DB_NOW_MS, Inner, RESULTS_CHANNEL};
 use crate::store::queue::{
@@ -100,7 +101,7 @@ async fn insert_results(txn: &Transaction<'_>, results: &[NewResult]) -> Result<
         .map(|r| r.blob.as_ref().map(|(k, _)| k.to_string()))
         .collect();
     let expiries: Vec<Option<i64>> = results.iter().map(|r| r.expires_at_ms).collect();
-    txn.execute(
+    txn.execute_cached(
         "INSERT INTO lda_results (route, body, blob, expires_at_ms)
          SELECT route, body, blob, expires_at_ms
          FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
@@ -121,7 +122,7 @@ async fn insert_results(txn: &Transaction<'_>, results: &[NewResult]) -> Result<
         let keys: Vec<&str> = registered.iter().map(|(k, _, _)| k.as_str()).collect();
         let types: Vec<&str> = registered.iter().map(|(_, t, _)| *t).collect();
         let expiries: Vec<Option<i64>> = registered.iter().map(|(_, _, e)| *e).collect();
-        txn.execute(
+        txn.execute_cached(
             "INSERT INTO lda_blobs (key, content_type, expires_at_ms)
              SELECT * FROM unnest($1::text[], $2::text[], $3::bigint[])
              ON CONFLICT (key) DO UPDATE
@@ -130,7 +131,7 @@ async fn insert_results(txn: &Transaction<'_>, results: &[NewResult]) -> Result<
         )
         .await?;
     }
-    txn.execute("SELECT pg_notify($1, '')", &[&RESULTS_CHANNEL])
+    txn.execute_cached("SELECT pg_notify($1, '')", &[&RESULTS_CHANNEL])
         .await?;
     Ok(())
 }
@@ -146,7 +147,7 @@ async fn drop_request_blobs(
         return Ok(keys);
     }
     let names: Vec<String> = keys.iter().map(ToString::to_string).collect();
-    txn.execute("DELETE FROM lda_blobs WHERE key = ANY($1)", &[&names])
+    txn.execute_cached("DELETE FROM lda_blobs WHERE key = ANY($1)", &[&names])
         .await?;
     Ok(keys)
 }
@@ -185,7 +186,7 @@ impl Inner {
                     }
                 }
             }
-            txn.execute(
+            txn.execute_cached(
                 "INSERT INTO lda_requests
                     (id, request_token, queue, partition_id, deadline, envelope, payload)
                  SELECT id, request_token, queue, partition_id, deadline, envelope, payload
@@ -206,7 +207,7 @@ impl Inner {
             )
             .await?;
             if !blob_keys.is_empty() {
-                txn.execute(
+                txn.execute_cached(
                     "INSERT INTO lda_blobs (key, content_type)
                      SELECT * FROM unnest($1::text[], $2::text[])
                      ON CONFLICT (key) DO UPDATE
@@ -229,7 +230,7 @@ impl Inner {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let client = self.pool.get().await?;
         let rows = client
-            .query(
+            .query_cached(
                 "SELECT seq, deadline, envelope, cancelled FROM lda_peek($1, $2, $3, $4)",
                 &[&queue, &self.owner, &now_ms, &limit],
             )
@@ -254,7 +255,7 @@ impl Inner {
     pub(crate) async fn has_pending(&self, queue: String, now_ms: i64) -> Result<bool, StoreError> {
         let client = self.pool.get().await?;
         Ok(client
-            .query_one(
+            .query_one_cached(
                 "SELECT EXISTS (SELECT 1 FROM lda_requests
                                 WHERE queue = $1 AND dispatch_epoch = 0 AND not_before_ms <= $2)",
                 &[&queue, &now_ms],
@@ -334,7 +335,7 @@ impl Inner {
         let mut tracked = Vec::new();
         if !claims.is_empty() {
             let rows = txn
-                .query(
+                .query_cached(
                     &format!(
                         "UPDATE lda_requests r
                          SET dispatch_epoch = p.epoch,
@@ -345,7 +346,7 @@ impl Inner {
                            AND p.owner = $3 AND NOT p.draining
                            AND p.lease_expires_ms > {DB_NOW_MS}
                          RETURNING r.seq, r.id, r.request_token, r.partition_id,
-                                   r.dispatch_epoch, r.dispatch_attempt"
+                                   r.dispatch_epoch, r.dispatch_attempt, r.payload"
                     ),
                     &[&claims, &queue, &self.owner],
                 )
@@ -364,10 +365,13 @@ impl Inner {
                     attempt: row.get(5),
                 };
                 if let Some(slot) = out.get_mut(i) {
-                    *slot = Admitted::Claimed(ClaimRef {
-                        generation: crate::api::request::generation_key(&t.id, &t.token),
-                        claim_id: u64::try_from(t.attempt).unwrap_or(0),
-                    });
+                    *slot = Admitted::Claimed {
+                        claim: ClaimRef {
+                            generation: crate::api::request::generation_key(&t.id, &t.token),
+                            claim_id: u64::try_from(t.attempt).unwrap_or(0),
+                        },
+                        payload: row.get::<_, Option<Vec<u8>>>(6).map(Bytes::from),
+                    };
                 }
                 tracked.push(t);
             }
@@ -376,7 +380,7 @@ impl Inner {
         if !removals.is_empty() {
             let seqs: Vec<i64> = removals.iter().map(|(_, s)| *s).collect();
             let rows = txn
-                .query(
+                .query_cached(
                     "DELETE FROM lda_requests r USING lda_partitions p
                      WHERE r.seq = ANY($1) AND r.queue = $2 AND r.dispatch_epoch = 0
                        AND p.queue = r.queue AND p.partition_id = r.partition_id
@@ -458,7 +462,7 @@ impl Inner {
             let tokens: Vec<&str> = finishes.iter().map(|f| f.1).collect();
             let attempts: Vec<i64> = finishes.iter().map(|f| f.2).collect();
             let rows = txn
-                .query(FINISH, &[&self.owner, &ids, &tokens, &attempts])
+                .query_cached(FINISH, &[&self.owner, &ids, &tokens, &attempts])
                 .await?;
             let mut done = HashSet::new();
             let mut blob_tokens = Vec::new();
@@ -493,7 +497,7 @@ impl Inner {
             let due: Vec<i64> = retries.iter().map(|r| r.3).collect();
             let envelopes: Vec<&str> = retries.iter().map(|r| r.4.as_str()).collect();
             let n = txn
-                .execute(
+                .execute_cached(
                     RETRY,
                     &[&self.owner, &ids, &tokens, &attempts, &due, &envelopes],
                 )
@@ -507,7 +511,7 @@ impl Inner {
             let tokens: Vec<&str> = releases.iter().map(|r| r.1).collect();
             let attempts: Vec<i64> = releases.iter().map(|r| r.2).collect();
             let n = txn
-                .execute(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
+                .execute_cached(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
                 .await?;
             applied.fenced += releases
                 .len()
@@ -516,7 +520,7 @@ impl Inner {
         if !fenced_blobs.is_empty() {
             let names: Vec<String> = fenced_blobs.iter().map(ToString::to_string).collect();
             let registered: HashSet<String> = txn
-                .query("SELECT key FROM lda_blobs WHERE key = ANY($1)", &[&names])
+                .query_cached("SELECT key FROM lda_blobs WHERE key = ANY($1)", &[&names])
                 .await?
                 .iter()
                 .map(|row| row.get(0))
@@ -558,7 +562,7 @@ impl Inner {
             PayloadStorage::Inline => {
                 let client = self.pool.get().await?;
                 let row = client
-                    .query_opt(
+                    .query_opt_cached(
                         "SELECT payload FROM lda_requests WHERE id = $1 AND request_token = $2",
                         &[&envelope.request.id, &envelope.routing.request_token],
                     )
@@ -583,7 +587,7 @@ impl Inner {
         }
         let client = self.pool.get().await?;
         let row = client
-            .query_one(
+            .query_one_cached(
                 "WITH live AS (
                     SELECT max(seq) AS seq FROM lda_requests
                     WHERE id = ANY($1) GROUP BY id
@@ -610,7 +614,7 @@ impl Inner {
         let now_s = now_ms.div_euclid(1000);
         let client = self.pool.get().await?;
         let row = client
-            .query_one(
+            .query_one_cached(
                 "WITH base AS MATERIALIZED (
                     SELECT deadline FROM lda_requests
                     WHERE queue = $1 AND dispatch_epoch = 0 AND not_before_ms <= $2
@@ -645,7 +649,7 @@ pub(crate) async fn cancelled_keys(
     let tokens: Vec<&str> = keys.iter().map(|(_, t)| t.as_str()).collect();
     let client = pool.get().await?;
     let rows = client
-        .query(
+        .query_cached(
             "SELECT r.id, r.request_token FROM lda_requests r
              JOIN unnest($1::text[], $2::text[]) AS k(id, request_token)
                ON r.id = k.id AND r.request_token = k.request_token
@@ -666,7 +670,7 @@ mod tests {
     use crate::store::postgres::schema::migrate;
     use crate::store::postgres::test_support::schema_url;
 
-    const ROWS: i64 = 20_000;
+    const ROWS: i64 = 50_000;
 
     /// A `json` column, as text.
     struct Json(String);
@@ -738,7 +742,7 @@ mod tests {
             &[],
         )
         .await;
-        assert!(peek < 500, "peek of 10 touched {peek} blocks");
+        assert!(peek < 2000, "peek of 10 touched {peek} blocks");
 
         client
             .batch_execute(

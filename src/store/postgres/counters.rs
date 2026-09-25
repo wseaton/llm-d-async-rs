@@ -25,6 +25,7 @@ use crate::boxed::BoxFuture;
 use crate::gate::admission::counters::{BucketSpec, CounterError, Counters, Slot};
 use crate::store::error::StoreError;
 use crate::store::postgres::DB_NOW_MS;
+use crate::store::postgres::cached::Cached;
 
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -251,7 +252,7 @@ impl Shared {
                 timed(async {
                     let client = self.pool.get().await?;
                     client
-                        .execute(
+                        .execute_cached(
                             &format!(
                                 "INSERT INTO lda_quota_holders (holder, expires_ms)
                                  VALUES ($1, {DB_NOW_MS} + $2)"
@@ -321,13 +322,13 @@ impl Shared {
         timed(async {
             let client = self.pool.get().await?;
             client
-                .execute(
+                .execute_cached(
                     "DELETE FROM lda_quota_holders WHERE holder = $1",
                     &[&holder.name],
                 )
                 .await?;
             client
-                .execute(
+                .execute_cached(
                     "DELETE FROM lda_quota_slots WHERE holder = $1",
                     &[&holder.name],
                 )
@@ -358,7 +359,7 @@ impl Shared {
             let granted: Result<i32, StatementError> = timed(async {
                 let client = self.pool.get().await?;
                 let row = client
-                    .query_one(
+                    .query_one_cached(
                         "SELECT lda_quota_acquire($1, $2, $3, $4)",
                         &[&key, &holder.name, &n, &limit],
                     )
@@ -429,7 +430,7 @@ impl Shared {
                 let released: Result<(), StatementError> = timed(async {
                     let client = self.pool.get().await?;
                     client
-                        .execute(
+                        .execute_cached(
                             "UPDATE lda_quota_slots s SET used = greatest(s.used - r.n, 0)
                              FROM unnest($2::text[], $3::int[]) AS r(key, n)
                              WHERE s.holder = $1 AND s.key = r.key",
@@ -478,7 +479,7 @@ impl Shared {
             let reaped: Result<(), StatementError> = timed(async {
                 let client = self.pool.get().await?;
                 client
-                    .execute(
+                    .execute_cached(
                         &format!(
                             "WITH dead AS (
                                 DELETE FROM lda_quota_holders WHERE expires_ms < {DB_NOW_MS} - $1
@@ -503,7 +504,7 @@ impl Shared {
         let renewed: Result<bool, StatementError> = timed(async {
             let client = self.pool.get().await?;
             let n = client
-                .execute(
+                .execute_cached(
                     &format!(
                         "UPDATE lda_quota_holders SET expires_ms = {DB_NOW_MS} + $2
                          WHERE holder = $1 AND expires_ms > {DB_NOW_MS}"
@@ -570,7 +571,7 @@ impl Shared {
         let granted: i32 = timed(async {
             let client = self.pool.get().await?;
             Ok(client
-                .query_one(
+                .query_one_cached(
                     "SELECT lda_quota_admit($1, $2, $3, $4)",
                     &[&key, &n, &limit, &window_ms],
                 )
@@ -591,7 +592,7 @@ impl Shared {
         let granted: i32 = timed(async {
             let client = self.pool.get().await?;
             Ok(client
-                .query_one(
+                .query_one_cached(
                     "SELECT lda_rate_take($1, $2, $3, $4, $5)",
                     &[&key, &n, &spec.rate, &spec.capacity, &spec.expires_ms],
                 )

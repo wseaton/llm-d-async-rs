@@ -8,6 +8,7 @@ pub mod usage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use tokio::time::{Instant as TokioInstant, sleep, sleep_until, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -36,6 +37,17 @@ use crate::worker::usage::parse_usage;
 const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// Backoff after a failed cancellation or payload read.
 const STORE_ERROR_RETRY_SECS: f64 = 1.0;
+
+/// Where one dispatch goes and what it sends.
+struct Dispatching<'a> {
+    url: &'a str,
+    headers: &'a Headers,
+    labels: &'a QueueLabels,
+    /// The claim this dispatch runs under; it names the result blob.
+    claim_id: u64,
+    /// The inline request body that came with the claim, taken at send.
+    payload: Option<Bytes>,
+}
 
 /// How one dispatch ends.
 enum End {
@@ -139,6 +151,7 @@ impl Worker {
             guard,
             releases,
             ingested,
+            payload,
         } = claimed;
         let labels = &source.labels;
         self.metrics.queue_depth_dec(labels);
@@ -148,10 +161,14 @@ impl Worker {
             self.metrics.async_request(labels);
         }
 
-        let attempt = guard.claim_id();
-        let end = self
-            .decide(&mut envelope, &url, &headers, labels, attempt)
-            .await;
+        let mut dispatching = Dispatching {
+            url: &url,
+            headers: &headers,
+            labels,
+            claim_id: guard.claim_id(),
+            payload,
+        };
+        let end = self.decide(&mut envelope, &mut dispatching).await;
         match end {
             End::Finish(result) => guard.finish(|claim| Outcome::Finish {
                 claim,
@@ -171,14 +188,8 @@ impl Worker {
         drop(releases);
     }
 
-    async fn decide(
-        &self,
-        envelope: &mut InternalRequest,
-        url: &str,
-        headers: &Headers,
-        labels: &QueueLabels,
-        attempt: u64,
-    ) -> End {
+    async fn decide(&self, envelope: &mut InternalRequest, d: &mut Dispatching<'_>) -> End {
+        let labels = d.labels;
         let mut next_cancel_check = None;
         if let Some(end) = self.check_cancelled(envelope, &mut next_cancel_check).await {
             return end;
@@ -215,7 +226,7 @@ impl Worker {
             return end;
         }
         let _inflight = Inflight::start(&self.metrics, labels);
-        self.send(envelope, url, headers, labels, attempt).await
+        self.send(envelope, d).await
     }
 
     /// `Some` when the request was cancelled, or when cancellation could not
@@ -324,14 +335,8 @@ impl Worker {
         }
     }
 
-    async fn send(
-        &self,
-        envelope: &mut InternalRequest,
-        url: &str,
-        headers: &Headers,
-        labels: &QueueLabels,
-        attempt: u64,
-    ) -> End {
+    async fn send(&self, envelope: &mut InternalRequest, d: &mut Dispatching<'_>) -> End {
+        let labels = d.labels;
         let id = envelope.request.id.clone();
         let retry_count = envelope.routing.retry_count;
         let span = tracing::info_span!(
@@ -350,7 +355,7 @@ impl Worker {
             otel.status_code = tracing::field::Empty,
         );
         propagation::set_parent_from_metadata(&span, &envelope.request.metadata);
-        self.send_in_span(envelope, url, headers, labels, attempt, &span)
+        self.send_in_span(envelope, d, &span)
             .instrument(span.clone())
             .await
     }
@@ -358,16 +363,18 @@ impl Worker {
     async fn send_in_span(
         &self,
         envelope: &mut InternalRequest,
-        url: &str,
-        headers: &Headers,
-        labels: &QueueLabels,
-        attempt: u64,
+        d: &mut Dispatching<'_>,
         span: &tracing::Span,
     ) -> End {
+        let (url, headers, labels) = (d.url, d.headers, d.labels);
         let request_deadline = deadline_instant(envelope.request.deadline)
             .min(TokioInstant::now() + self.request_timeout);
 
-        let payload = match self.store.open_payload(envelope).await {
+        let opened = match d.payload.take() {
+            Some(bytes) => Ok(Some(PayloadBody::Inline(bytes))),
+            None => self.store.open_payload(envelope).await,
+        };
+        let payload = match opened {
             Ok(Some(payload)) => payload,
             Ok(None) => {
                 self.metrics.failed(labels);
@@ -403,7 +410,7 @@ impl Worker {
             }
         };
         propagation::inject_current(&mut header_map);
-        let Some(result_key) = BlobKey::result(&envelope.routing.request_token, attempt) else {
+        let Some(result_key) = BlobKey::result(&envelope.routing.request_token, d.claim_id) else {
             self.metrics.failed(labels);
             return End::Finish(ResultMessage::error(
                 envelope,
@@ -670,19 +677,26 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let Some(Admitted::Claimed(claim)) = admitted.into_iter().next() else {
+            let Some(Admitted::Claimed { claim, payload }) = admitted.into_iter().next() else {
                 panic!("not claimed")
             };
-            self.dispatch_of(envelope, claim, url)
+            self.dispatch_of(envelope, claim, payload, url)
         }
 
-        fn dispatch_of(&self, envelope: InternalRequest, claim: ClaimRef, url: &str) -> Dispatch {
+        fn dispatch_of(
+            &self,
+            envelope: InternalRequest,
+            claim: ClaimRef,
+            payload: Option<bytes::Bytes>,
+            url: &str,
+        ) -> Dispatch {
             Dispatch {
                 claimed: Claimed {
                     envelope,
                     guard: ClaimGuard::new(claim, self.outcomes_tx.clone()),
                     releases: Releases::default(),
                     ingested: Instant::now(),
+                    payload,
                 },
                 source: Arc::new(SourceMeta {
                     labels: QueueLabels::new("q", "q", POOL),
@@ -1064,7 +1078,12 @@ mod tests {
             generation: "g".into(),
             claim_id: 1,
         };
-        let dispatch = rig.dispatch_of(envelope("r", "t", "q", secs_from_now(60)), claim, &gw.url);
+        let dispatch = rig.dispatch_of(
+            envelope("r", "t", "q", secs_from_now(60)),
+            claim,
+            None,
+            &gw.url,
+        );
         let before = now_millis();
         process(&worker, dispatch).await;
         let (_, due_ms) = retried(rig.outcome());

@@ -143,6 +143,7 @@ mod tests {
                 ),
                 releases: Releases::default(),
                 ingested: Instant::now(),
+                payload: None,
             }
         }
 

@@ -4,6 +4,7 @@ use crate::store::Stamped;
 use crate::store::blob::BlobBody;
 use crate::store::blob::key::BlobKey;
 use crate::store::error::StoreError;
+use crate::store::postgres::cached::Cached;
 use crate::store::postgres::{DB_NOW_MS, Inner};
 use crate::store::queue::{ACK_TOMBSTONE_TTL_MS, AckOutcome, ResultClaim};
 
@@ -19,10 +20,10 @@ fn seq_of(claim_id: u64) -> i64 {
 /// rate windows whose admissions all aged out, and buckets past their
 /// expiry, which would start full again anyway. Rows a counter statement
 /// holds are skipped.
-async fn sweep_counters(txn: &tokio_postgres::Transaction<'_>) -> Result<u64, StoreError> {
+async fn sweep_counters(txn: &deadpool_postgres::Transaction<'_>) -> Result<u64, StoreError> {
     let keys = txn
-        .execute(
-            "DELETE FROM lda_quota_keys WHERE key IN (
+        .execute_cached(
+"DELETE FROM lda_quota_keys WHERE key IN (
                 SELECT k.key FROM lda_quota_keys k
                 WHERE NOT EXISTS (SELECT 1 FROM lda_quota_slots s WHERE s.key = k.key AND s.used > 0)
                 FOR UPDATE SKIP LOCKED
@@ -30,10 +31,10 @@ async fn sweep_counters(txn: &tokio_postgres::Transaction<'_>) -> Result<u64, St
             &[],
         )
         .await?;
-    txn.execute("DELETE FROM lda_quota_slots s WHERE s.used <= 0", &[])
+    txn.execute_cached("DELETE FROM lda_quota_slots s WHERE s.used <= 0", &[])
         .await?;
     let windows = txn
-        .execute(
+        .execute_cached(
             &format!(
                 "WITH idle AS (
                     SELECT w.key, w.window_ms FROM lda_quota_windows w
@@ -54,7 +55,7 @@ async fn sweep_counters(txn: &tokio_postgres::Transaction<'_>) -> Result<u64, St
         )
         .await?;
     let buckets = txn
-        .execute(
+        .execute_cached(
             &format!(
                 "DELETE FROM lda_rate_buckets WHERE key IN (
                     SELECT key FROM lda_rate_buckets WHERE expires_ms < {DB_NOW_MS}
@@ -77,7 +78,7 @@ impl Inner {
         let mut client = self.pool.get().await?;
         let txn = client.transaction().await?;
         let row = txn
-            .query_opt(
+            .query_opt_cached(
                 "WITH picked AS MATERIALIZED (
                     SELECT seq FROM lda_results
                     WHERE route = $1 AND lease_until_ms <= $2
@@ -96,7 +97,7 @@ impl Inner {
         let body: String = row.get(0);
         let blob: Option<String> = row.get(1);
         if let Some(blob) = blob {
-            txn.execute(
+            txn.execute_cached(
                 "UPDATE lda_blobs SET expires_at_ms = least(coalesce(expires_at_ms, $2), $2)
                  WHERE key = $1",
                 &[&blob, &retained],
@@ -116,7 +117,7 @@ impl Inner {
     ) -> Result<Option<ResultClaim>, StoreError> {
         let client = self.pool.get().await?;
         let row = client
-            .query_opt(
+            .query_opt_cached(
                 "WITH picked AS MATERIALIZED (
                     SELECT seq FROM lda_results
                     WHERE route = $1 AND lease_until_ms <= $2
@@ -146,7 +147,7 @@ impl Inner {
     ) -> Result<bool, StoreError> {
         let client = self.pool.get().await?;
         let n = client
-            .execute(
+            .execute_cached(
                 "UPDATE lda_results SET lease_until_ms = $4 + $5
                  WHERE route = $1 AND seq = $2 AND lease_owner = $3 AND lease_until_ms > $4",
                 &[&route, &seq_of(claim), &owner, &now_ms, &lease_ms],
@@ -166,7 +167,7 @@ impl Inner {
         let mut client = self.pool.get().await?;
         let txn = client.transaction().await?;
         let acked = txn
-            .query_opt(
+            .query_opt_cached(
                 "DELETE FROM lda_results
                  WHERE route = $1 AND seq = $2 AND lease_owner = $3 AND lease_until_ms > $4
                  RETURNING blob",
@@ -176,14 +177,14 @@ impl Inner {
         let mut dropped = Vec::new();
         let outcome = match acked {
             Some(row) => {
-                txn.execute(
+                txn.execute_cached(
                     "INSERT INTO lda_result_acks (route, seq, expires_at_ms) VALUES ($1, $2, $3)
                      ON CONFLICT (route, seq) DO UPDATE SET expires_at_ms = EXCLUDED.expires_at_ms",
                     &[&route, &seq, &now_ms.saturating_add(ACK_TOMBSTONE_TTL_MS)],
                 )
                 .await?;
                 if let Some(blob) = row.get::<_, Option<String>>(0) {
-                    txn.execute("DELETE FROM lda_blobs WHERE key = $1", &[&blob])
+                    txn.execute_cached("DELETE FROM lda_blobs WHERE key = $1", &[&blob])
                         .await?;
                     dropped.extend(BlobKey::parse(&blob));
                 }
@@ -191,7 +192,7 @@ impl Inner {
             }
             None => {
                 let tombstone = txn
-                    .query_opt(
+                    .query_opt_cached(
                         "SELECT 1 FROM lda_result_acks
                          WHERE route = $1 AND seq = $2 AND expires_at_ms > $3",
                         &[&route, &seq, &now_ms],
@@ -217,7 +218,7 @@ impl Inner {
     ) -> Result<Option<(BlobBody, String)>, StoreError> {
         let client = self.pool.get().await?;
         let row = client
-            .query_opt(
+            .query_opt_cached(
                 "SELECT content_type FROM lda_blobs
                  WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
                 &[&key.to_string(), &now_ms],
@@ -238,7 +239,7 @@ impl Inner {
     pub(crate) async fn result_depth(&self, route: String, now_ms: i64) -> Result<u64, StoreError> {
         let client = self.pool.get().await?;
         let n: i64 = client
-            .query_one(
+            .query_one_cached(
                 "SELECT count(*) FROM lda_results
                  WHERE route = $1 AND lease_until_ms <= $2
                    AND (expires_at_ms IS NULL OR expires_at_ms > $2)",
@@ -252,7 +253,7 @@ impl Inner {
     pub(crate) async fn kv_get(&self, key: String) -> Result<Stamped<Option<Vec<u8>>>, StoreError> {
         let client = self.pool.get().await?;
         let row = client
-            .query_one(
+            .query_one_cached(
                 &format!("SELECT (SELECT value FROM lda_kv WHERE key = $1), {DB_NOW_MS}"),
                 &[&key],
             )
@@ -272,7 +273,7 @@ impl Inner {
         match value {
             Some(value) => {
                 client
-                    .execute(
+                    .execute_cached(
                         "INSERT INTO lda_kv (key, value) VALUES ($1, $2)
                          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                         &[&key, &value],
@@ -281,7 +282,7 @@ impl Inner {
             }
             None => {
                 client
-                    .execute("DELETE FROM lda_kv WHERE key = $1", &[&key])
+                    .execute_cached("DELETE FROM lda_kv WHERE key = $1", &[&key])
                     .await?;
             }
         }
@@ -294,19 +295,19 @@ impl Inner {
         let mut client = self.pool.get().await?;
         let txn = client.transaction().await?;
         let results = txn
-            .execute(
+            .execute_cached(
                 "DELETE FROM lda_results WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= $1",
                 &[&now_ms],
             )
             .await?;
         let acks = txn
-            .execute(
+            .execute_cached(
                 "DELETE FROM lda_result_acks WHERE expires_at_ms <= $1",
                 &[&now_ms],
             )
             .await?;
         let blobs = txn
-            .query(
+            .query_cached(
                 "DELETE FROM lda_blobs WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= $1
                  RETURNING key",
                 &[&now_ms],
@@ -331,7 +332,7 @@ impl Inner {
         let names: Vec<String> = listed.iter().map(|l| l.key.to_string()).collect();
         let client = self.pool.get().await?;
         let referenced: HashSet<String> = client
-            .query("SELECT key FROM lda_blobs WHERE key = ANY($1)", &[&names])
+            .query_cached("SELECT key FROM lda_blobs WHERE key = ANY($1)", &[&names])
             .await?
             .iter()
             .map(|row| row.get(0))
