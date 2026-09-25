@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::api::payload::PayloadInfo;
+use crate::api::progress::Progress;
 use crate::api::routing::InternalRouting;
 
 /// Caller-visible request fields, stored without the payload.
@@ -51,6 +52,8 @@ pub struct InternalRequest {
     pub routing: InternalRouting,
     pub request: RequestMessage,
     pub payload: PayloadInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
 }
 
 impl InternalRequest {

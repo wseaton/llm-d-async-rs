@@ -536,18 +536,73 @@ async fn inference_failures_map_to_results() {
         Some(3.0)
     );
 
-    let mut unreachable = request("unreachable", 60);
+    let mut unreachable = request("unreachable", 3);
     unreachable["request_queue_name"] = json!("dead");
     p.submit(unreachable).await;
     let r = p.next_result("dead-results").await;
-    assert_eq!(r["error_code"], "INFERENCE_ERROR");
+    assert_eq!(r["error_code"], "DEADLINE_EXCEEDED");
     assert!(r.get("status_code").is_none());
+    let dead_q = [("queue_name", "dead")];
+    assert!(
+        p.metric("llm_d_async_async_request_retries_total", &dead_q)
+            .await
+            .unwrap()
+            >= 1.0
+    );
+    assert_eq!(
+        p.metric("llm_d_async_async_failed_requests_total", &dead_q)
+            .await,
+        None
+    );
 
     p.submit(request("slow", 2)).await;
     let r = p.next_result(RESULTS).await;
     assert_eq!(
         (r["id"].as_str(), r["error_code"].as_str()),
         (Some("slow"), Some("DEADLINE_EXCEEDED"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upstream_dying_mid_request_is_retried() {
+    let upstream = Upstream::start().await;
+    upstream.reply_with(|_, n| match n {
+        0 => Reply::die_after(Duration::from_millis(300)),
+        _ => Reply::json(200, json!({"choices": [{"text": "resumed"}]})),
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let p = Processor::start(
+        dir.path(),
+        Spec::new(transport(json!([queue("q", &upstream)]))),
+    )
+    .await;
+
+    p.submit(request("dies", 60)).await;
+    let r = p.next_result(RESULTS).await;
+    assert_eq!(
+        (r["id"].as_str(), r["status_code"].as_u64()),
+        (Some("dies"), Some(200))
+    );
+    assert!(r["payload"].as_str().unwrap().contains("resumed"));
+
+    let sent = upstream.recorded();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].body, sent[1].body);
+    let q = [("queue_name", "q")];
+    assert_eq!(
+        p.metric("llm_d_async_async_request_retries_total", &q)
+            .await,
+        Some(1.0)
+    );
+    assert_eq!(
+        p.metric("llm_d_async_async_failed_requests_total", &q)
+            .await,
+        None
+    );
+    assert_eq!(
+        p.metric("llm_d_async_async_shedded_requests_total", &q)
+            .await,
+        None
     );
 }
 

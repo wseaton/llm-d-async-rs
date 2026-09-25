@@ -1,0 +1,10 @@
+data: {"id":"cmpl-81f0cdc9567a2122","object":"text_completion","created":1790361610,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" four","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,40980,13,35357,279,2701,34612,11646,448,264,3175,2805,17114,323,4302,770,13,576,2629,315,1378,323,1378,374],"token_ids":[3040]}]}
+
+data: {"id":"cmpl-81f0cdc9567a2122","object":"text_completion","created":1790361610,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":".","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[13]}]}
+
+data: {"id":"cmpl-81f0cdc9567a2122","object":"text_completion","created":1790361610,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"","logprobs":null,"finish_reason":"stop","stop_reason":null,"prompt_token_ids":null,"token_ids":[151329]}]}
+
+data: {"id":"cmpl-81f0cdc9567a2122","object":"text_completion","created":1790361610,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":25,"total_tokens":28,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":0}},"system_fingerprint":"vllm-fixture-0.30.0","metrics":{"generation_time_ms":18.928050994873047,"mean_itl_ms":9.464025497436523}}
+
+data: [DONE]
+

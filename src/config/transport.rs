@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::config::ConfigError;
 use crate::config::pools::WorkerPools;
+use crate::worker::vllm::ToolCallParser;
 
 pub type GateParams = serde_json::Map<String, serde_json::Value>;
 
@@ -56,6 +57,19 @@ pub struct QueueConfig {
     pub gate_params: GateParams,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Stream eligible completions and chat requests, rebuilding each
+    /// non-streamed response from its stream.
+    #[serde(default)]
+    pub resumable: bool,
+    /// The vLLM `--tool-call-parser` behind this queue. Without it, chat
+    /// requests that offer tools are sent as submitted.
+    #[serde(default)]
+    pub tool_call_parser: Option<ToolCallParser>,
+    /// A vLLM serving this queue's model with `--enable-scale-out`, whose
+    /// render and derender endpoints let interrupted chat requests continue.
+    /// Without it they restart.
+    #[serde(default)]
+    pub render_url: Option<String>,
 }
 
 impl QueueConfig {
@@ -119,6 +133,17 @@ impl TransportConfig {
             if let Err(e) = reqwest::Url::parse(&q.igw_base_url) {
                 return invalid(format!("queue {:?}: igw_base_url: {e}", q.queue_name));
             }
+            if (q.tool_call_parser.is_some() || q.render_url.is_some()) && !q.resumable {
+                return invalid(format!(
+                    "queue {:?}: tool_call_parser and render_url apply only to resumable queues",
+                    q.queue_name
+                ));
+            }
+            if let Some(url) = &q.render_url
+                && let Err(e) = reqwest::Url::parse(url)
+            {
+                return invalid(format!("queue {:?}: render_url: {e}", q.queue_name));
+            }
             if pools.get(&q.worker_pool_id).is_none() {
                 return invalid(format!(
                     "queue {:?}: worker pool {:?} not found in pool configuration",
@@ -138,6 +163,7 @@ impl TransportConfig {
 mod tests {
     use crate::config::pools::{WorkerPoolConfig, WorkerPools};
     use crate::config::transport::TransportConfig;
+    use crate::worker::vllm::ToolCallParser;
 
     fn pools() -> WorkerPools {
         WorkerPools::new(vec![
@@ -162,6 +188,60 @@ mod tests {
         assert_eq!(q.id, "q");
         assert_eq!(q.worker_pool_id, "default");
         assert_eq!(q.request_path_url, "/v1/completions");
+        assert!(!q.resumable);
+    }
+
+    #[test]
+    fn resumable_opt_in() {
+        let cfg = TransportConfig::parse(
+            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true}]}"#,
+            &pools(),
+            false,
+        )
+        .unwrap();
+        assert!(cfg.queues[0].resumable);
+        assert_eq!(cfg.queues[0].tool_call_parser, None);
+
+        let cfg = TransportConfig::parse(
+            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"tool_call_parser":"glm47"}]}"#,
+            &pools(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(cfg.queues[0].tool_call_parser, Some(ToolCallParser::Glm47));
+
+        let cfg = TransportConfig::parse(
+            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://render:8000"}]}"#,
+            &pools(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.queues[0].render_url.as_deref(),
+            Some("http://render:8000")
+        );
+
+        for (input, want) in [
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","tool_call_parser":"glm45"}]}"#,
+                "tool_call_parser and render_url apply only to resumable queues",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"tool_call_parser":"hermes"}]}"#,
+                "unknown variant `hermes`",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","render_url":"http://render"}]}"#,
+                "tool_call_parser and render_url apply only to resumable queues",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"not a url"}]}"#,
+                "render_url",
+            ),
+        ] {
+            let err = TransportConfig::parse(input.as_bytes(), &pools(), false).unwrap_err();
+            assert!(err.to_string().contains(want), "{input}: {err}");
+        }
     }
 
     #[test]

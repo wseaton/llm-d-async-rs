@@ -6,3 +6,4 @@ mod harness;
 mod health;
 mod lifecycle;
 mod replicas;
+mod resumable;

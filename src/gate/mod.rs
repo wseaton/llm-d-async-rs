@@ -116,6 +116,7 @@ pub(crate) mod test_support {
             },
             payload: crate::store::staging::StagedPayload::Inline(Vec::new())
                 .info(crate::api::payload::JSON_CONTENT_TYPE),
+            progress: None,
         }
     }
 

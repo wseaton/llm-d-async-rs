@@ -8,6 +8,7 @@ use crate::dispatch::claim::ClaimGuard;
 use crate::gate::release::Releases;
 use crate::merge::headers::Headers;
 use crate::telemetry::metrics::QueueLabels;
+use crate::worker::vllm::ToolCallParser;
 
 /// A request a consumer claimed, on its way to the merge policy.
 pub struct Claimed {
@@ -27,6 +28,9 @@ pub struct SourceMeta {
     pub igw_base_url: String,
     pub request_path: String,
     pub inference_objective: String,
+    pub resumable: bool,
+    pub tool_call_parser: Option<ToolCallParser>,
+    pub render_url: Option<String>,
 }
 
 impl SourceMeta {
@@ -67,6 +71,9 @@ mod tests {
             igw_base_url: "http://gw:8000/".into(),
             request_path: "/v1/completions".into(),
             inference_objective: String::new(),
+            resumable: false,
+            tool_call_parser: None,
+            render_url: None,
         };
         let mut env = envelope("a", "t", "q", 1);
         assert_eq!(meta.url_for(&env), "http://gw:8000/v1/completions");

@@ -1,0 +1,23 @@
+{
+  "endpoint": "/v1/completions",
+  "response_status": 200,
+  "response_content_type": "application/json",
+  "stream_status": 200,
+  "stream_content_type": "text/event-stream; charset=utf-8",
+  "vllm_version": "0.30.0",
+  "model": "zai-org/GLM-4.7",
+  "server_args": [
+    "zai-org/GLM-4.7",
+    "--data-parallel-size=1",
+    "--data-parallel-size-local=0",
+    "--data-parallel-address=127.0.0.1",
+    "--data-parallel-rpc-port=29551",
+    "--host=127.0.0.1",
+    "--port=8100",
+    "--max-model-len=8192",
+    "--reasoning-parser=glm47",
+    "--tool-call-parser=glm47",
+    "--enable-auto-tool-choice"
+  ],
+  "scripted_output": " Grüße, 世界! 👨‍👩‍👧‍👦 🫠 café naïve — fertig."
+}

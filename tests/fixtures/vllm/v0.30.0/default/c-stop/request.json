@@ -1,0 +1,7 @@
+{
+  "model": "zai-org/GLM-4.7",
+  "prompt": "Case c-stop. Finish the following arithmetic sentence with a single short phrase and nothing else. The sum of two and two is",
+  "max_tokens": 32,
+  "temperature": 0,
+  "n": 1
+}

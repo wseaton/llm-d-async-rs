@@ -69,6 +69,8 @@ impl GateReason {
 pub struct Metrics {
     registry: Registry,
     retries: IntCounterVec,
+    resumes: IntCounterVec,
+    resumed_tokens: IntCounterVec,
     async_requests: IntCounterVec,
     dispatched: IntCounterVec,
     gate_wait_requeues: IntCounterVec,
@@ -159,6 +161,18 @@ impl Metrics {
                 &r,
                 "async_request_retries_total",
                 "Total number of async request retries.",
+                q,
+            )?,
+            resumes: counter(
+                &r,
+                "async_request_resumes_total",
+                "Interrupted generations requeued to continue from their saved output.",
+                q,
+            )?,
+            resumed_tokens: counter(
+                &r,
+                "async_resumed_tokens_total",
+                "Output tokens saved at interruptions, which continuations did not decode again.",
                 q,
             )?,
             async_requests: counter(
@@ -347,6 +361,12 @@ impl Metrics {
 
     pub fn retry(&self, l: &QueueLabels) {
         self.retries.with_label_values(&l.values()).inc();
+    }
+    pub fn resume(&self, l: &QueueLabels, saved_tokens: usize) {
+        self.resumes.with_label_values(&l.values()).inc();
+        self.resumed_tokens
+            .with_label_values(&l.values())
+            .inc_by(saved_tokens as u64);
     }
     pub fn async_request(&self, l: &QueueLabels) {
         self.async_requests.with_label_values(&l.values()).inc();

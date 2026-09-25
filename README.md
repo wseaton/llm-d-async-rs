@@ -151,7 +151,8 @@ Durations use Go syntax (`90s`, `1h30m`, `250ms`), so existing values carry over
       "worker_pool_id": "default", "inference_objective": "batch",
       "result_queue_name": "", "result_ttl_seconds": 0,
       "labels": {"tier": "batch"},
-      "gate_type": "quota", "gate_params": {"mode": "concurrency", "limit": 8}
+      "gate_type": "quota", "gate_params": {"mode": "concurrency", "limit": 8},
+      "resumable": false, "tool_call_parser": null, "render_url": null
     }
   ]
 }
@@ -167,8 +168,8 @@ Pools (`pools.json`) and merge policies (`merge.json`) keep the Go format:
 
 ## API
 
-Request bodies are opaque bytes. They are never parsed after submission and
-are streamed to the gateway exactly as submitted.
+Request bodies are opaque bytes, streamed to the gateway exactly as
+submitted, except on [resumable queues](#resumable-queues).
 
 | | |
 |---|---|
@@ -204,6 +205,49 @@ is not UTF-8 is stored the same way. The result then carries `payload_ref`,
 responses stay inline. The fields match `feat/result-payload-ref` in the Go
 repo; its rule (anything not JSON goes to a blob) does not.
 
+## Resumable queues
+
+A queue with `"resumable": true` sends eligible `/v1/completions` and
+`/v1/chat/completions` requests to vLLM streamed, with
+`stream_options.include_usage` and `return_token_ids` set, and rebuilds the
+response vLLM returns to the non-streamed request from the stream. The result
+is the same JSON the caller would have got, with the token IDs the processor
+asked for removed. An error event fails the request with the status and body
+the non-streamed request would have failed with; a stream that ends before
+`[DONE]` is retried.
+
+Only an inline JSON payload is eligible, and only when a continuation of its
+generation would answer the same request. These are sent as submitted: a
+`stream: true` request, `n` or `best_of` above 1, beam search, `seed`,
+structured output (`response_format` other than text, `structured_outputs`),
+`tool_choice` of `required` or a named function, non-zero presence or
+frequency penalty, `logprobs` or `prompt_logprobs`, `echo`,
+`kv_transfer_params`, a completions `prompt` that is not one text or one list
+of token IDs, and chat requests with `include_reasoning: false` or
+`return_prompt_text: true`.
+
+vLLM parses tool calls differently in a stream than in a whole response, per
+tool parser, so a chat request that offers `tools` is only streamed when the
+queue names the server's parser in `tool_call_parser`. Supported: `glm45`,
+`glm47`.
+
+An interrupted completion continues from the tokens it already produced: the
+retry sends the original prompt's token IDs plus the saved ones, with
+`max_tokens` and `min_tokens` reduced, and the result reads as one
+generation. Progress travels with the request, so a draining replica saves it
+and another continues. An interrupted chat request continues the same way
+when the queue sets `render_url` to a vLLM serving its model with
+`--enable-scale-out`: the processor renders the request there, continues on
+the gateway's `/inference/v1/generate`, and has vLLM derender the whole
+output into the message. The resumed response's
+`usage.completion_tokens_details` is null, since derender does not report
+reasoning tokens. Requests with stop strings or prompt truncation, chat
+requests with `stop_token_ids`, and chat on a queue without `render_url`
+restart instead.
+
+The response types follow Python vLLM 0.30. `tests/fixtures/vllm` holds
+responses recorded from it, streamed and not, and the tests rebuild each one.
+
 ## Gates
 
 `constant`, `composite`, `wait-on-refuse`, `tier-priority-admission`,
@@ -219,6 +263,8 @@ share a `prefix` and `attribute` share per-tenant counters, keyed
 - **No Redis, no Pub/Sub.** Queues live in the embedded store (one process)
   or Postgres (many replicas, split by partition leases instead of Redis
   claim leases).
+- **A connection that fails before response headers is retried.** Go failed
+  the request, so a model pod dying during a non-streamed generation lost it.
 - **Unknown `gate_type` is a startup error.** Go silently used an open gate,
   so a typo disabled flow control.
 - **Queue-level `Wait` keeps the request queued.** Go dispatched it.

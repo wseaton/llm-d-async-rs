@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::worker::vllm::Api;
+
 #[derive(Deserialize)]
 struct Body {
     usage: Option<Usage>,
@@ -16,24 +18,12 @@ struct Usage {
 /// Prompt and completion tokens from an OpenAI completions response.
 /// `None` for other endpoints, unparsable bodies, or no usage object.
 pub fn parse_usage(body: &[u8], request_url: &str) -> Option<(u64, u64)> {
-    if !completions_endpoint(request_url) {
-        return None;
-    }
+    Api::from_url(request_url)?;
     let usage = serde_json::from_slice::<Body>(body).ok()?.usage?;
     Some((
         u64::try_from(usage.prompt_tokens).unwrap_or(0),
         u64::try_from(usage.completion_tokens).unwrap_or(0),
     ))
-}
-
-/// Matches llm-d-router's suffix rule, so gateways behind a base path and
-/// per-request endpoint overrides still count.
-fn completions_endpoint(request_url: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(request_url) else {
-        return false;
-    };
-    let path = url.path().trim().trim_end_matches('/');
-    path.ends_with("v1/completions") || path.ends_with("v1/chat/completions")
 }
 
 #[cfg(test)]

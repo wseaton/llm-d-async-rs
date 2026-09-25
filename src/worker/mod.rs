@@ -3,7 +3,9 @@
 
 pub mod backoff;
 pub mod client;
+pub mod resume;
 pub mod usage;
+pub mod vllm;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,9 +35,13 @@ use crate::worker::backoff::{
     first_gate_wait, jittered, next_gate_wait, retry_backoff_secs, with_retry_after,
 };
 use crate::worker::client::{ClientError, InferenceClient, ResponseBody};
+use crate::worker::resume::Resuming;
 use crate::worker::usage::parse_usage;
+use crate::worker::vllm::Plan;
 
 const CANCEL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Continuations of one request before it restarts from scratch.
+const MAX_RESUMES: u32 = 16;
 /// Backoff after a failed cancellation or payload read.
 const STORE_ERROR_RETRY_SECS: f64 = 1.0;
 
@@ -48,6 +54,8 @@ struct Dispatching<'a> {
     claim_id: u64,
     /// The inline request body that came with the claim, taken at send.
     payload: Option<Bytes>,
+    /// Set for a resumable queue.
+    resuming: Option<Resuming<'a>>,
 }
 
 /// How one dispatch ends.
@@ -169,6 +177,11 @@ impl Worker {
             labels,
             claim_id: guard.claim_id(),
             payload,
+            resuming: source.resumable.then(|| Resuming {
+                igw_base_url: &source.igw_base_url,
+                tool_call_parser: source.tool_call_parser,
+                render_url: source.render_url.as_deref(),
+            }),
         };
         let end = self.decide(&mut envelope, &mut dispatching).await;
         match end {
@@ -425,15 +438,55 @@ impl Worker {
         };
 
         self.metrics.dispatched(labels);
-        tracing::debug!(%url, "sending inference request");
+        tracing::debug!(
+            %url,
+            resumable = d.resuming.is_some(),
+            saved_tokens = envelope.progress.as_ref().map_or(0, |p| p.token_ids.len()),
+            "sending inference request"
+        );
         let started = Instant::now();
-        let sent = tokio::select! {
-            biased;
-            sent = timeout_at(
-                request_deadline,
-                self.client.send(url, header_map, payload, &result_key),
-            ) => sent,
-            () = self.drain.cancelled() => return End::Release,
+        let mut streamed: Option<Plan> = None;
+        let sent = {
+            let progress = &mut envelope.progress;
+            let streamed = &mut streamed;
+            let inline = match &payload {
+                PayloadBody::Inline(body) => Some(body.clone()),
+                PayloadBody::Blob(_) => None,
+            };
+            let request = async {
+                let Some(resuming) = d.resuming else {
+                    *progress = None;
+                    return self
+                        .client
+                        .send(url, header_map, payload, &result_key)
+                        .await;
+                };
+                *streamed = resuming
+                    .plan(&self.client, url, &header_map, inline.as_ref(), progress)
+                    .await?;
+                match (streamed.as_mut(), inline) {
+                    (Some(plan), Some(body)) => {
+                        resuming
+                            .send(&self.client, url, header_map, plan, &body)
+                            .await
+                    }
+                    _ => {
+                        self.client
+                            .send(url, header_map, payload, &result_key)
+                            .await
+                    }
+                }
+            };
+            tokio::select! {
+                biased;
+                sent = timeout_at(request_deadline, request) => Some(sent),
+                () = self.drain.cancelled() => None,
+            }
+        };
+        let Some(sent) = sent else {
+            return self
+                .keep_progress(envelope, labels, streamed.as_ref())
+                .unwrap_or(End::Release);
         };
         self.metrics
             .inference_latency(labels, started.elapsed().as_millis() as f64);
@@ -461,8 +514,52 @@ impl Worker {
                     )),
                 }
             }
-            Ok(Err(error)) => self.failed(envelope, labels, span, *error),
+            Ok(Err(error)) => {
+                if !error.category.fatal()
+                    && let Some(end) = self.keep_progress(envelope, labels, streamed.as_ref())
+                {
+                    self.record_error(span, error.category.as_str());
+                    tracing::info!(error = %error, "resuming interrupted generation");
+                    return end;
+                }
+                self.failed(envelope, labels, span, *error)
+            }
         }
+    }
+
+    /// Saves the output of an interrupted stream in the envelope. When the
+    /// attempt added output, the request goes back to its queue due now, to
+    /// continue while its blocks may still be cached; otherwise it takes
+    /// the usual retry path with its progress kept.
+    fn keep_progress(
+        &self,
+        envelope: &mut InternalRequest,
+        labels: &QueueLabels,
+        streamed: Option<&Plan>,
+    ) -> Option<End> {
+        let (saved, resumes) = envelope
+            .progress
+            .as_ref()
+            .map_or((0, 0), |p| (p.token_ids.len(), p.resumes));
+        if resumes >= MAX_RESUMES {
+            envelope.progress = None;
+            return None;
+        }
+        envelope.progress = streamed?.reassembly.progress(resumes + 1);
+        let added = envelope
+            .progress
+            .as_ref()?
+            .token_ids
+            .len()
+            .saturating_sub(saved);
+        if added == 0 {
+            if let Some(p) = &mut envelope.progress {
+                p.resumes = resumes;
+            }
+            return None;
+        }
+        self.metrics.resume(labels, added);
+        Some(End::Retry(0.0))
     }
 
     fn record_error(&self, span: &tracing::Span, category: &str) {
@@ -711,6 +808,9 @@ mod tests {
                     igw_base_url: String::new(),
                     request_path: String::new(),
                     inference_objective: String::new(),
+                    resumable: false,
+                    tool_call_parser: None,
+                    render_url: None,
                 }),
                 url: url.into(),
                 headers: Headers::default(),

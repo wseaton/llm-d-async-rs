@@ -1,0 +1,65 @@
+{
+  "model": "zai-org/GLM-4.7",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Case h-multi-turn. You are a careful assistant that answers in one short sentence and never adds extra commentary beyond what was asked of you."
+    },
+    {
+      "role": "user",
+      "content": "What is the weather in Paris?"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "The user wants live weather, so the tool is needed.",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_0",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\": \"Paris\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_0",
+      "content": "{\"temp_c\": 17}"
+    },
+    {
+      "role": "user",
+      "content": "And what about Berlin?"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Look up the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    }
+  ],
+  "max_tokens": 96,
+  "temperature": 0,
+  "n": 1,
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "return_token_ids": true
+}

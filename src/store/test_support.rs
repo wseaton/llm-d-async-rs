@@ -23,6 +23,7 @@ pub fn envelope(id: &str, token: &str, queue: &str, deadline: i64) -> InternalRe
             model: String::new(),
         },
         payload: StagedPayload::Inline(Vec::new()).info("application/json"),
+        progress: None,
     }
 }
 

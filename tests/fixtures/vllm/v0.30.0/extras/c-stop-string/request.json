@@ -1,0 +1,10 @@
+{
+  "model": "zai-org/GLM-4.7",
+  "prompt": "Case c-stop-string. Emit a short phrase, then the marker word, then some more text that the caller is expected to never see:",
+  "max_tokens": 48,
+  "temperature": 0,
+  "n": 1,
+  "stop": [
+    "END"
+  ]
+}

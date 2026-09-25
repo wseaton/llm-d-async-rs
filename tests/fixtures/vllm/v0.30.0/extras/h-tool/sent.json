@@ -1,0 +1,41 @@
+{
+  "model": "zai-org/GLM-4.7",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Case h-tool. You are a careful assistant that answers in one short sentence and never adds extra commentary beyond what was asked of you."
+    },
+    {
+      "role": "user",
+      "content": "What is the weather in Paris right now?"
+    }
+  ],
+  "max_tokens": 64,
+  "temperature": 0,
+  "n": 1,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Look up the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "return_token_ids": true
+}

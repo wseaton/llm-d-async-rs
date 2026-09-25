@@ -130,6 +130,7 @@ async fn envelope(
         },
         request: sub.message(),
         payload: StagedPayload::Inline(Vec::new()).info(JSON_CONTENT_TYPE),
+        progress: None,
     })
 }
 

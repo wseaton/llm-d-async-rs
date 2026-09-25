@@ -168,6 +168,7 @@ mod tests {
                 size: 0,
                 storage: PayloadStorage::Inline,
             },
+            progress: None,
         }
     }
 

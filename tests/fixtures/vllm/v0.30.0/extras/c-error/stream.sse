@@ -1,0 +1,12 @@
+data: {"id":"cmpl-a05c2996f986a83b","object":"text_completion","created":1790361611,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" partial","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,18883,13,576,4712,374,2087,311,3690,949,3117,1526,419,1681,11,773,279,45375,702,311,7329,264,9467,1465,25],"token_ids":[7130]}]}
+
+data: {"id":"cmpl-a05c2996f986a83b","object":"text_completion","created":1790361611,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" output","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[2550]}]}
+
+data: {"id":"cmpl-a05c2996f986a83b","object":"text_completion","created":1790361611,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" before","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[1573]}]}
+
+data: {"id":"cmpl-a05c2996f986a83b","object":"text_completion","created":1790361611,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" the","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[279]}]}
+
+data: {"error": {"message": "Internal server error", "type": "InternalServerError", "param": null, "code": 500}}
+
+data: [DONE]
+
