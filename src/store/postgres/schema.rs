@@ -7,7 +7,7 @@ use deadpool_postgres::Pool;
 
 use crate::store::error::StoreError;
 
-const VERSION: i32 = 2;
+const VERSION: i32 = 3;
 
 /// Serializes concurrent migrations: "lda-mig" in ASCII.
 const MIGRATE_LOCK: i64 = 0x006c_6461_2d6d_6967;
@@ -146,12 +146,30 @@ fn ddl() -> Vec<String> {
             expires_ms BIGINT           NOT NULL
         )"
         .into(),
+        PEEK.into(),
         QUOTA_ACQUIRE.into(),
         QUOTA_ADMIT.into(),
         RATE_TAKE.into(),
         "CREATE TABLE IF NOT EXISTS lda_schema (version INTEGER NOT NULL)".into(),
     ]
 }
+
+/// The first `p_limit` requests of `p_queue` due by `p_now`, by deadline, in
+/// partitions `p_owner` holds and is not draining. It walks the pending index
+/// in order and stops at the limit.
+const PEEK: &str = "
+CREATE OR REPLACE FUNCTION lda_peek(p_queue TEXT, p_owner TEXT, p_now BIGINT, p_limit BIGINT)
+RETURNS TABLE (seq BIGINT, deadline BIGINT, envelope TEXT, cancelled BOOLEAN)
+LANGUAGE sql STABLE SET enable_seqscan = off SET enable_bitmapscan = off AS $$
+    SELECT r.seq, r.deadline, r.envelope, r.cancelled
+    FROM lda_requests r
+    WHERE r.queue = p_queue AND r.dispatch_epoch = 0 AND r.not_before_ms <= p_now
+      AND r.partition_id = ANY(ARRAY(
+          SELECT partition_id FROM lda_partitions
+          WHERE queue = p_queue AND owner = p_owner AND NOT draining))
+    ORDER BY r.deadline, r.seq
+    LIMIT p_limit
+$$";
 
 /// Grants up to `p_n` of `p_limit` concurrent slots of `p_key` to a live
 /// holder; -1 when the holder's lease has lapsed. Locking the key row first

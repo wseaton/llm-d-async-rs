@@ -19,6 +19,41 @@ use crate::store::staging::StagedPayload;
 /// Largest number of rows one statement inserts.
 const INSERT_CHUNK: usize = 1000;
 
+/// Deletes the claims `(id, request_token, attempt)` of `$2..$4` that `$1`
+/// still holds under the epoch they were dispatched in.
+pub(crate) const FINISH: &str = "
+    DELETE FROM lda_requests r
+    USING unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt),
+          lda_partitions p
+    WHERE r.id = ANY($2::text[]) AND r.id = k.id AND r.request_token = k.request_token
+      AND r.dispatch_epoch <> 0 AND r.dispatch_attempt = k.attempt
+      AND p.queue = r.queue AND p.partition_id = r.partition_id
+      AND p.owner = $1 AND p.epoch = r.dispatch_epoch
+    RETURNING r.id, r.request_token, r.dispatch_attempt, r.payload IS NULL";
+
+/// Returns the claims of `$2..$4` that `$1` holds to their queue, due at `$5`
+/// with envelopes `$6`.
+pub(crate) const RETRY: &str = "
+    UPDATE lda_requests r
+    SET dispatch_epoch = 0, not_before_ms = k.due, envelope = k.envelope
+    FROM unnest($2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::text[])
+         AS k(id, request_token, attempt, due, envelope),
+         lda_partitions p
+    WHERE r.id = ANY($2::text[]) AND r.id = k.id AND r.request_token = k.request_token
+      AND r.dispatch_epoch <> 0 AND r.dispatch_attempt = k.attempt
+      AND p.queue = r.queue AND p.partition_id = r.partition_id
+      AND p.owner = $1";
+
+/// Returns the claims of `$2..$4` that `$1` holds to their queue unchanged.
+pub(crate) const RELEASE: &str = "
+    UPDATE lda_requests r SET dispatch_epoch = 0
+    FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt),
+         lda_partitions p
+    WHERE r.id = ANY($2::text[]) AND r.id = k.id AND r.request_token = k.request_token
+      AND r.dispatch_epoch <> 0 AND r.dispatch_attempt = k.attempt
+      AND p.queue = r.queue AND p.partition_id = r.partition_id
+      AND p.owner = $1";
+
 fn seq_of(key: PendingKey) -> i64 {
     i64::try_from(key.seq).unwrap_or(i64::MAX)
 }
@@ -195,13 +230,7 @@ impl Inner {
         let client = self.pool.get().await?;
         let rows = client
             .query(
-                "SELECT r.seq, r.deadline, r.envelope, r.cancelled
-                 FROM lda_requests r
-                 JOIN lda_partitions p ON p.queue = r.queue AND p.partition_id = r.partition_id
-                 WHERE r.queue = $1 AND r.dispatch_epoch = 0 AND r.not_before_ms <= $3
-                   AND p.owner = $2 AND NOT p.draining
-                 ORDER BY r.deadline, r.seq
-                 LIMIT $4",
+                "SELECT seq, deadline, envelope, cancelled FROM lda_peek($1, $2, $3, $4)",
                 &[&queue, &self.owner, &now_ms, &limit],
             )
             .await?;
@@ -429,18 +458,7 @@ impl Inner {
             let tokens: Vec<&str> = finishes.iter().map(|f| f.1).collect();
             let attempts: Vec<i64> = finishes.iter().map(|f| f.2).collect();
             let rows = txn
-                .query(
-                    "DELETE FROM lda_requests r
-                     USING unnest($2::text[], $3::text[], $4::bigint[])
-                           AS k(id, request_token, attempt),
-                           lda_partitions p
-                     WHERE r.id = k.id AND r.request_token = k.request_token
-                       AND r.dispatch_epoch > 0 AND r.dispatch_attempt = k.attempt
-                       AND p.queue = r.queue AND p.partition_id = r.partition_id
-                       AND p.owner = $1 AND p.epoch = r.dispatch_epoch
-                     RETURNING r.id, r.request_token, r.dispatch_attempt, r.payload IS NULL",
-                    &[&self.owner, &ids, &tokens, &attempts],
-                )
+                .query(FINISH, &[&self.owner, &ids, &tokens, &attempts])
                 .await?;
             let mut done = HashSet::new();
             let mut blob_tokens = Vec::new();
@@ -476,15 +494,7 @@ impl Inner {
             let envelopes: Vec<&str> = retries.iter().map(|r| r.4.as_str()).collect();
             let n = txn
                 .execute(
-                    "UPDATE lda_requests r
-                     SET dispatch_epoch = 0, not_before_ms = k.due, envelope = k.envelope
-                     FROM unnest($2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::text[])
-                          AS k(id, request_token, attempt, due, envelope),
-                          lda_partitions p
-                     WHERE r.id = k.id AND r.request_token = k.request_token
-                       AND r.dispatch_epoch > 0 AND r.dispatch_attempt = k.attempt
-                       AND p.queue = r.queue AND p.partition_id = r.partition_id
-                       AND p.owner = $1",
+                    RETRY,
                     &[&self.owner, &ids, &tokens, &attempts, &due, &envelopes],
                 )
                 .await?;
@@ -497,17 +507,7 @@ impl Inner {
             let tokens: Vec<&str> = releases.iter().map(|r| r.1).collect();
             let attempts: Vec<i64> = releases.iter().map(|r| r.2).collect();
             let n = txn
-                .execute(
-                    "UPDATE lda_requests r SET dispatch_epoch = 0
-                     FROM unnest($2::text[], $3::text[], $4::bigint[])
-                          AS k(id, request_token, attempt),
-                          lda_partitions p
-                     WHERE r.id = k.id AND r.request_token = k.request_token
-                       AND r.dispatch_epoch > 0 AND r.dispatch_attempt = k.attempt
-                       AND p.queue = r.queue AND p.partition_id = r.partition_id
-                       AND p.owner = $1",
-                    &[&self.owner, &ids, &tokens, &attempts],
-                )
+                .execute(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
                 .await?;
             applied.fenced += releases
                 .len()
@@ -654,4 +654,132 @@ pub(crate) async fn cancelled_keys(
         )
         .await?;
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use deadpool_postgres::Object;
+    use tokio_postgres::types::{FromSql, ToSql, Type};
+
+    use crate::store::postgres::connect::Database;
+    use crate::store::postgres::requests::{FINISH, RELEASE, RETRY};
+    use crate::store::postgres::schema::migrate;
+    use crate::store::postgres::test_support::schema_url;
+
+    const ROWS: i64 = 20_000;
+
+    /// A `json` column, as text.
+    struct Json(String);
+
+    impl<'a> FromSql<'a> for Json {
+        fn from_sql(
+            _: &Type,
+            raw: &'a [u8],
+        ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+            Ok(Self(std::str::from_utf8(raw)?.to_owned()))
+        }
+
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::JSON
+        }
+    }
+
+    /// Shared buffers `statement` reads to find its rows (for an insert,
+    /// update or delete, below the write), run once and rolled back.
+    async fn blocks(client: &mut Object, statement: &str, params: &[&(dyn ToSql + Sync)]) -> i64 {
+        let txn = client.transaction().await.unwrap();
+        txn.batch_execute("SET LOCAL plan_cache_mode = force_generic_plan")
+            .await
+            .unwrap();
+        let row = txn
+            .query_one(
+                &format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}"),
+                params,
+            )
+            .await
+            .unwrap();
+        txn.rollback().await.unwrap();
+        let plan: serde_json::Value = serde_json::from_str(&row.get::<_, Json>(0).0).unwrap();
+        let mut node = &plan[0]["Plan"];
+        if node["Node Type"] == "ModifyTable" {
+            node = &node["Plans"][0];
+        }
+        node["Shared Hit Blocks"].as_i64().unwrap() + node["Shared Read Blocks"].as_i64().unwrap()
+    }
+
+    /// Queue tables go from empty to full faster than autovacuum analyzes
+    /// them. Each hot statement must touch rows in proportion to its batch
+    /// whatever the statistics say, not scan the queue.
+    #[tokio::test]
+    async fn hot_statements_stay_proportional_to_their_batch_under_stale_statistics() {
+        let Some(url) = schema_url().await else {
+            return;
+        };
+        let db = Database::connect(&url, 2, None).await.unwrap();
+        migrate(&db.pool).await.unwrap();
+        let mut client = db.pool.get().await.unwrap();
+        client
+            .batch_execute(&format!(
+                "INSERT INTO lda_partitions (queue, partition_id, owner, epoch)
+                     SELECT 'q', g, 'me', 1 FROM generate_series(0, 63) g;
+                 INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope)
+                     SELECT 'early' || g, 'early' || g, 'q', g, g, '{{}}' FROM generate_series(1, 7) g;
+                 ANALYZE lda_requests;
+                 INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope, payload)
+                     SELECT 'r' || g, 't' || g, 'q', g % 64, g, '{{}}', convert_to(repeat('x', 512), 'UTF8')
+                     FROM generate_series(1, {ROWS}) g;"
+            ))
+            .await
+            .unwrap();
+
+        let peek = blocks(
+            &mut client,
+            "SELECT * FROM lda_peek('q', 'me', 9223372036854775807, 10)",
+            &[],
+        )
+        .await;
+        assert!(peek < 500, "peek of 10 touched {peek} blocks");
+
+        client
+            .batch_execute(
+                "ANALYZE lda_requests;
+                 UPDATE lda_requests SET dispatch_epoch = 1, dispatch_attempt = seq;",
+            )
+            .await
+            .unwrap();
+        let ids: Vec<String> = (100..132).map(|g| format!("r{g}")).collect();
+        let tokens: Vec<String> = (100..132).map(|g| format!("t{g}")).collect();
+        let attempts: Vec<i64> = client
+            .query(
+                "SELECT dispatch_attempt FROM lda_requests WHERE id = ANY($1) ORDER BY seq",
+                &[&ids],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let due: Vec<i64> = vec![0; ids.len()];
+        let envelopes: Vec<String> = vec!["{}".into(); ids.len()];
+        let owner = "me";
+        for (name, statement, params) in [
+            (
+                "finish",
+                FINISH,
+                vec![&owner as &(dyn ToSql + Sync), &ids, &tokens, &attempts],
+            ),
+            (
+                "retry",
+                RETRY,
+                vec![&owner, &ids, &tokens, &attempts, &due, &envelopes],
+            ),
+            ("release", RELEASE, vec![&owner, &ids, &tokens, &attempts]),
+        ] {
+            let touched = blocks(&mut client, statement, &params).await;
+            assert!(
+                touched < 300,
+                "{name} of 32 among {ROWS} in flight touched {touched} blocks"
+            );
+        }
+    }
 }

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::store::error::StoreError;
+use crate::store::postgres::requests::RELEASE;
 use crate::store::postgres::{DB_NOW_MS, Inner};
 
 pub const PARTITIONS: i32 = 64;
@@ -507,15 +508,7 @@ impl Inner {
             let (tokens, attempts): (Vec<String>, Vec<i64>) = rest.into_iter().unzip();
             tracing::warn!(%queue, requests = ids.len(), "returning claims this process lost track of");
             client
-                .execute(
-                    "UPDATE lda_requests r SET dispatch_epoch = 0
-                     FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt),
-                          lda_partitions p
-                     WHERE r.id = k.id AND r.request_token = k.request_token
-                       AND r.dispatch_epoch > 0 AND r.dispatch_attempt = k.attempt
-                       AND p.queue = r.queue AND p.partition_id = r.partition_id AND p.owner = $1",
-                    &[&self.owner, &ids, &tokens, &attempts],
-                )
+                .execute(RELEASE, &[&self.owner, &ids, &tokens, &attempts])
                 .await?;
         }
         self.with_queue(queue, |q, _| q.reconcile = false)?;
