@@ -15,8 +15,9 @@ const MAX_BATCH_BYTES: usize = 16 << 20;
 const FIRST_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 const KIB: usize = 1024;
-/// Result bytes that may wait for the writer across every worker.
-pub const OUTCOME_BUDGET_BYTES: usize = 256 << 20;
+/// Result bytes that may wait for the writer across every worker: the
+/// batch being written and the next few.
+pub const OUTCOME_BUDGET_BYTES: usize = 4 * MAX_BATCH_BYTES;
 
 /// Result bytes that may wait for the writer at once. A worker with a result
 /// to hand over waits for room, so responses larger or faster than the store
