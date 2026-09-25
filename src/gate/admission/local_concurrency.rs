@@ -3,9 +3,10 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::gate::admission::GatingMode;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, Verdict};
+use crate::gate::{Gate, Verdict};
 
 /// Caps requests in flight through this gate in this process.
 ///

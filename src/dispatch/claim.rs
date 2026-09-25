@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::store::requests::{ClaimRef, Outcome};
+use crate::store::queue::{ClaimRef, Outcome};
 
 pub type OutcomeSender = UnboundedSender<Outcome>;
 
@@ -17,6 +17,10 @@ impl ClaimGuard {
             claim: Some(claim),
             outcomes,
         }
+    }
+
+    pub fn claim_id(&self) -> u64 {
+        self.claim.as_ref().map_or(0, |c| c.claim_id)
     }
 
     pub fn finish(mut self, outcome: impl FnOnce(ClaimRef) -> Outcome) {
@@ -39,7 +43,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::dispatch::claim::ClaimGuard;
-    use crate::store::requests::{ClaimRef, Outcome};
+    use crate::store::queue::{ClaimRef, Outcome};
 
     fn claim() -> ClaimRef {
         ClaimRef {

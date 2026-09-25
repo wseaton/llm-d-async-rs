@@ -1,26 +1,14 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::api::dispatch_rate::DispatchRateLimit;
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::clock::now_millis;
+use crate::gate::admission::counters::{BucketSpec, Counters};
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, Verdict};
+use crate::gate::{Gate, Verdict};
 use crate::store::Store;
 use crate::telemetry::metrics::Metrics;
-
-#[derive(Debug, Clone, Copy)]
-struct Bucket {
-    tokens: f64,
-    last_ms: i64,
-    /// The bucket starts full again after this, one second past the lease
-    /// that last filled it.
-    expires_ms: i64,
-}
-
-/// Token buckets shared by every leased-rate gate with the same state key.
-#[derive(Default)]
-pub struct Buckets(Mutex<HashMap<String, Bucket>>);
 
 /// Enforces a pool-wide dispatch rate leased by an external controller.
 ///
@@ -33,7 +21,7 @@ pub struct LeasedRateGate {
     state_key: String,
     pool_id: String,
     burst_seconds: f64,
-    buckets: Arc<Buckets>,
+    counters: Arc<dyn Counters>,
     metrics: Arc<Metrics>,
 }
 
@@ -50,7 +38,7 @@ impl LeasedRateGate {
         state_key: String,
         pool_id: String,
         burst_seconds: f64,
-        buckets: Arc<Buckets>,
+        counters: Arc<dyn Counters>,
         metrics: Arc<Metrics>,
     ) -> Self {
         metrics.drain_limit(&pool_id, None);
@@ -60,7 +48,7 @@ impl LeasedRateGate {
             state_key,
             pool_id,
             burst_seconds,
-            buckets,
+            counters,
             metrics,
         }
     }
@@ -105,34 +93,24 @@ impl LeasedRateGate {
         }
     }
 
-    /// Takes one token if available.
-    fn take(&self, rate: f64, valid_until_ms: i64, now_ms: i64) -> bool {
-        let capacity = (rate * self.burst_seconds).max(1.0);
-        if !capacity.is_finite() {
-            return false;
-        }
-        let Ok(mut buckets) = self.buckets.0.lock() else {
-            return false;
+    /// Takes one token from the bucket every gate with this state key
+    /// shares. An unreadable bucket refuses.
+    async fn take(&self, rate: f64, valid_until_ms: i64) -> bool {
+        let bucket = BucketSpec {
+            rate,
+            capacity: (rate * self.burst_seconds).max(1.0),
+            expires_ms: valid_until_ms.saturating_add(1000),
         };
-        let bucket = buckets.entry(self.state_key.clone()).or_insert(Bucket {
-            tokens: capacity,
-            last_ms: now_ms,
-            expires_ms: 0,
-        });
-        if now_ms >= bucket.expires_ms {
-            bucket.tokens = capacity;
-            bucket.last_ms = now_ms;
-        }
-        let now_ms = now_ms.max(bucket.last_ms);
-        let elapsed_s = (now_ms - bucket.last_ms) as f64 / 1000.0;
-        bucket.tokens = (bucket.tokens + elapsed_s * rate).min(capacity);
-        bucket.last_ms = now_ms;
-        bucket.expires_ms = valid_until_ms.saturating_add(1000);
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
-            true
-        } else {
-            false
+        match self
+            .counters
+            .take_token(self.state_key.clone(), bucket)
+            .await
+        {
+            Ok(taken) => taken,
+            Err(e) => {
+                tracing::warn!(pool = %self.pool_id, error = %e, "dispatch-rate bucket unavailable");
+                false
+            }
         }
     }
 }
@@ -162,11 +140,10 @@ impl Gate for LeasedRateGate {
             if limit.max_admission_rps == 0.0 {
                 return Verdict::Refuse;
             }
-            if self.take(
-                limit.max_admission_rps,
-                limit.valid_until_unix_millis,
-                now_ms,
-            ) {
+            if self
+                .take(limit.max_admission_rps, limit.valid_until_unix_millis)
+                .await
+            {
                 Verdict::Continue
             } else {
                 Verdict::Refuse
@@ -181,12 +158,13 @@ mod tests {
 
     use crate::api::dispatch_rate::{API_VERSION, DispatchRateLimit};
     use crate::clock::now_millis;
-    use crate::gate::admission::leased_rate::{Buckets, LeaseError, LeasedRateGate};
+    use crate::gate::admission::counters::local::LocalCounters;
+    use crate::gate::admission::leased_rate::{LeaseError, LeasedRateGate};
     use crate::gate::release::Releases;
     use crate::gate::test_support::request;
     use crate::gate::{Gate, Verdict};
     use crate::store::Store;
-    use crate::store::test_support::open;
+    use crate::store::embedded::test_support::open;
     use crate::telemetry::metrics::Metrics;
 
     fn gate(store: &Store, burst: f64) -> LeasedRateGate {
@@ -196,7 +174,7 @@ mod tests {
             "ctl:state".into(),
             "pool".into(),
             burst,
-            Arc::new(Buckets::default()),
+            Arc::new(LocalCounters::default()),
             Arc::new(Metrics::new().unwrap()),
         )
     }
@@ -213,7 +191,8 @@ mod tests {
 
     #[tokio::test]
     async fn fails_closed_without_a_valid_lease() {
-        let (_dir, store) = open();
+        let fixture = open().await;
+        let store = fixture.store.clone();
         let g = gate(&store, 1.0);
         assert_eq!(g.lease(now_millis()).await, Err(LeaseError::Missing));
         assert_eq!(g.budget().await, 0.0);
@@ -258,7 +237,8 @@ mod tests {
 
     #[tokio::test]
     async fn admits_a_burst_then_refuses() {
-        let (_dir, store) = open();
+        let fixture = open().await;
+        let store = fixture.store.clone();
         store
             .set_dispatch_rate("ctl", Some(&lease(3.0)))
             .await
@@ -273,35 +253,5 @@ mod tests {
         }
         // A 1s bucket at 3 rps holds 3 tokens; refill in this loop is well under one.
         assert_eq!(admitted, 3);
-    }
-
-    #[test]
-    fn bucket_refills_at_the_leased_rate_and_never_runs_backwards() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = Store::open(dir.path(), &crate::store::test_support::options()).unwrap();
-        let g = gate(&store, 1.0);
-        let until = 1_000_000;
-        assert!(g.take(2.0, until, 0));
-        assert!(g.take(2.0, until, 0));
-        assert!(!g.take(2.0, until, 0));
-        assert!(!g.take(2.0, until, 499));
-        assert!(g.take(2.0, until, 510));
-        // A clock step back must not refill the same interval twice.
-        assert!(!g.take(2.0, until, 100));
-        assert!(!g.take(2.0, until, 510));
-        assert!(g.take(2.0, until, 1010));
-        // Past the lease plus a second, the bucket starts full.
-        assert!(g.take(2.0, until, until + 1000));
-        assert!(g.take(2.0, until, until + 1000));
-    }
-
-    #[test]
-    fn small_rates_still_allow_one_request() {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, _) = Store::open(dir.path(), &crate::store::test_support::options()).unwrap();
-        let g = gate(&store, 0.1);
-        assert!(g.take(0.5, 1_000_000, 0));
-        assert!(!g.take(0.5, 1_000_000, 1_000));
-        assert!(g.take(0.5, 1_000_000, 2_000));
     }
 }

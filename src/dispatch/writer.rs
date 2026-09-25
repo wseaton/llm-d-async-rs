@@ -6,7 +6,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::clock::now_millis;
 use crate::store::Store;
-use crate::store::requests::Outcome;
+use crate::store::queue::Outcome;
 
 const MAX_BATCH: usize = 32;
 const FIRST_BACKOFF: Duration = Duration::from_millis(100);

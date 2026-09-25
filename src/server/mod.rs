@@ -64,7 +64,7 @@ pub fn api_router(state: AppState) -> Router {
             post(results::ack),
         )
         .route("/v1/results/{route}/depth", get(results::depth))
-        .route("/v1/blobs/results/{token}", get(results::blob))
+        .route("/v1/blobs/results/{name}", get(results::blob))
         .route(
             "/v1/admin/budgets/{key}",
             put(admin::put_budget)

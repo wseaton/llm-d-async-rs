@@ -1,6 +1,7 @@
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, Verdict};
+use crate::gate::{Gate, Verdict};
 
 /// Always open, full budget.
 pub struct OpenGate;

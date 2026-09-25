@@ -25,7 +25,7 @@ impl From<StageError> for ApiError {
     fn from(e: StageError) -> Self {
         match e {
             StageError::TooLarge { .. } => Self::TooLarge(e.to_string()),
-            StageError::Token(_) | StageError::Io(_) => Self::Internal(e.to_string()),
+            StageError::Token(_) | StageError::Blob(_) => Self::Internal(e.to_string()),
         }
     }
 }

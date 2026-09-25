@@ -13,9 +13,9 @@ use tokio::time::Instant;
 use crate::clock::now_millis;
 use crate::server::AppState;
 use crate::server::error::ApiError;
-use crate::store::blob::BlobKey;
+use crate::store::blob::key::BlobKey;
 use crate::store::error::StoreError;
-use crate::store::results::AckOutcome;
+use crate::store::queue::AckOutcome;
 
 const MAX_WAIT: Duration = Duration::from_secs(60);
 /// Also re-check this often while long-polling: a lapsed result lease makes
@@ -170,18 +170,18 @@ pub async fn depth(
     State(state): State<AppState>,
     Path(route): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let depth = state.store.result_depth(route).await?;
+    let depth = state.store.result_depth(route, now_millis()).await?;
     Ok(Json(serde_json::json!({ "depth": depth })))
 }
 
 /// Streams a result body stored by reference.
 pub async fn blob(
     State(state): State<AppState>,
-    Path(token): Path<String>,
+    Path(name): Path<String>,
 ) -> Result<Response, ApiError> {
-    let key =
-        BlobKey::result(&token).ok_or_else(|| ApiError::NotFound("no such result body".into()))?;
-    let (file, size, content_type) = state
+    let key = BlobKey::parse_result_name(&name)
+        .ok_or_else(|| ApiError::NotFound("no such result body".into()))?;
+    let (body, content_type) = state
         .store
         .open_result_blob(key, now_millis())
         .await?
@@ -193,7 +193,7 @@ pub async fn blob(
     };
     Response::builder()
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, size)
-        .body(Body::from_stream(tokio_util::io::ReaderStream::new(file)))
+        .header(header::CONTENT_LENGTH, body.size)
+        .body(Body::from_stream(body.stream))
         .map_err(|e| ApiError::Internal(e.to_string()))
 }

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use crate::gate::BoxFuture;
+use crate::boxed::BoxFuture;
 use crate::gate::metric::source::{MetricSource, Sample, SourceError, parse_value};
 
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(10);

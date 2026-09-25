@@ -4,3 +4,4 @@ mod delivery;
 mod flow_control;
 mod harness;
 mod lifecycle;
+mod replicas;

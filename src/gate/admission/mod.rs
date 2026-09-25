@@ -1,6 +1,7 @@
 //! Per-request admission gates.
 
 pub mod budget_key;
+pub mod counters;
 pub mod leased_rate;
 pub mod local_concurrency;
 pub mod quota;

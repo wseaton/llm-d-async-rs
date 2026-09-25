@@ -150,9 +150,15 @@ async fn large_binary_payload_streams_through_and_result_comes_back_by_reference
     assert_eq!(result["payload_size"], audio.len());
     assert_eq!(result["payload_sha256"], hex(&Sha256::digest(&audio)));
     let payload_ref = result["payload_ref"].as_str().unwrap();
-    assert_eq!(payload_ref, format!("blob://results/{token}"));
+    let name = payload_ref
+        .strip_prefix("blob://results/")
+        .expect("a result blob reference");
+    let attempt = name
+        .strip_prefix(&format!("{token}-"))
+        .expect("named after the request token and claim attempt");
+    assert!(attempt.parse::<u64>().is_ok(), "{payload_ref}");
 
-    let blob = p.get(&format!("/v1/blobs/results/{token}")).await;
+    let blob = p.get(&format!("/v1/blobs/results/{name}")).await;
     assert_eq!(blob.status(), StatusCode::OK);
     assert_eq!(blob.headers()["content-type"], "audio/mpeg");
     assert_eq!(blob.bytes().await.unwrap().as_ref(), audio.as_slice());
@@ -171,7 +177,7 @@ async fn large_binary_payload_streams_through_and_result_comes_back_by_reference
     let requests_dir = p.data_dir().join("blobs/requests");
     assert_eq!(std::fs::read_dir(&requests_dir).unwrap().count(), 0);
     assert_eq!(p.ack(RESULTS, &claim).await, StatusCode::NO_CONTENT);
-    let gone = p.get(&format!("/v1/blobs/results/{token}")).await;
+    let gone = p.get(&format!("/v1/blobs/results/{name}")).await;
     assert_eq!(gone.status(), StatusCode::NOT_FOUND);
 }
 

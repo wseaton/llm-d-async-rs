@@ -290,6 +290,75 @@ impl Spec {
         self.args.push(value.into());
         self
     }
+
+    /// Runs on the shared Postgres store at `db`. Partitions move between
+    /// replicas a third of `lease` apart.
+    pub fn postgres(self, db: &Postgres, lease: &str) -> Self {
+        self.arg("--store", "postgres")
+            .arg("--database-url", &db.url)
+            .arg("--database-max-connections", "4")
+            .arg("--partition-lease-ttl", lease)
+    }
+}
+
+/// One test's schema in the Postgres at `TEST_DATABASE_URL`. Without the
+/// variable, Postgres tests are skipped unless `REQUIRE_POSTGRES` is set.
+pub struct Postgres {
+    pub url: String,
+    client: tokio_postgres::Client,
+}
+
+impl Postgres {
+    pub async fn schema() -> Option<Self> {
+        let Ok(base) = std::env::var("TEST_DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_POSTGRES").is_none(),
+                "REQUIRE_POSTGRES is set but TEST_DATABASE_URL is not"
+            );
+            eprintln!("TEST_DATABASE_URL not set; skipping a Postgres test");
+            return None;
+        };
+        let schema = format!("e_{:016x}", rand::random::<u64>());
+        let sep = if base.contains('?') { '&' } else { '?' };
+        let url = format!("{base}{sep}options=-c%20search_path%3D{schema}");
+        let (client, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema}; SET search_path = {schema}"
+            ))
+            .await
+            .unwrap();
+        Some(Self { url, client })
+    }
+
+    /// Partitions of `queue` held per owner.
+    pub async fn partition_owners(&self, queue: &str) -> BTreeMap<String, i64> {
+        self.client
+            .query(
+                "SELECT owner, count(*) FROM lda_partitions WHERE queue = $1 GROUP BY owner",
+                &[&queue],
+            )
+            .await
+            .map(|rows| rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+            .unwrap_or_default()
+    }
+
+    /// Waits until `n` replicas each hold an equal share of `queue`.
+    pub async fn wait_split(&self, queue: &str, n: i64) {
+        eventually(&format!("{n} replicas to split {queue}"), || async {
+            let owners = self.partition_owners(queue).await;
+            let live: Vec<i64> = owners
+                .iter()
+                .filter(|(o, _)| !o.is_empty())
+                .map(|(_, c)| *c)
+                .collect();
+            (live.len() == n as usize && live.iter().all(|c| *c == 64 / n)).then_some(())
+        })
+        .await;
+    }
 }
 
 /// A queue entry pointing at `upstream`.

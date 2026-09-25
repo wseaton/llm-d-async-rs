@@ -15,9 +15,9 @@ use crate::dispatch::claim::{ClaimGuard, OutcomeSender};
 use crate::dispatch::message::Claimed;
 use crate::gate::release::Releases;
 use crate::gate::{SharedGate, Verdict};
-use crate::store::Store;
 use crate::store::error::StoreError;
-use crate::store::requests::{Admission, Admitted};
+use crate::store::queue::{Admission, Admitted};
+use crate::store::{Membership, Store};
 use crate::telemetry::metrics::{GateReason, Metrics, QueueLabels};
 
 /// A decided row: its admission and, for a claim, the request and the gate
@@ -44,6 +44,11 @@ pub struct Consumer {
 impl Consumer {
     pub async fn run(self, cancel: CancellationToken) {
         self.metrics.init_gate_decisions(&self.labels);
+        let _membership = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return,
+            m = Membership::join(self.store.clone(), self.config.queue_name.clone()) => m,
+        };
         let mut ticker = tokio::time::interval(self.poll_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -96,7 +101,7 @@ impl Consumer {
         if batch == 0 {
             // The budget held work back before any request was peeked; count
             // it, but only when work is actually waiting.
-            if self.store.has_pending(queue.clone()).await? {
+            if self.store.has_pending(queue.clone(), now_millis()).await? {
                 self.metrics
                     .gate_decision(&self.labels, GateReason::GateClosed);
             }
@@ -105,7 +110,7 @@ impl Consumer {
 
         let now_ms = now_millis();
         let mut pending: Vec<Pending> = Vec::new();
-        for peeked in self.store.peek(queue.clone(), batch).await? {
+        for peeked in self.store.peek(queue.clone(), batch, now_ms).await? {
             let mut envelope = match peeked.envelope {
                 Ok(envelope) => envelope,
                 Err(e) => {
@@ -131,25 +136,10 @@ impl Consumer {
                 pending.push(finish(envelope, result));
                 continue;
             }
-            match self
-                .store
-                .is_cancelled(
-                    envelope.request.id.clone(),
-                    envelope.routing.request_token.clone(),
-                    now_ms,
-                )
-                .await
-            {
-                Ok(true) => {
-                    let result = ResultMessage::cancelled(&envelope);
-                    pending.push(finish(envelope, result));
-                    continue;
-                }
-                Ok(false) => {}
-                // Workers check again before dispatch and fail closed.
-                Err(e) => {
-                    tracing::error!(id = %envelope.request.id, error = %e, "failed to check request cancellation")
-                }
+            if peeked.cancelled {
+                let result = ResultMessage::cancelled(&envelope);
+                pending.push(finish(envelope, result));
+                continue;
             }
 
             let mut releases = Releases::default();

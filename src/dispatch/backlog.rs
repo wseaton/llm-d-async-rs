@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use crate::clock::now_secs;
+use crate::clock::now_millis;
 use crate::dispatch::queues::{Queues, labels_of};
 use crate::store::Store;
 use crate::telemetry::deadline_proximity::BOUNDS_SECS;
@@ -34,7 +34,11 @@ pub async fn run(
         for config in queues.snapshot().await {
             let labels = labels_of(&config);
             match store
-                .backlog(config.queue_name.clone(), now_secs(), BOUNDS_SECS.to_vec())
+                .backlog(
+                    config.queue_name.clone(),
+                    now_millis(),
+                    BOUNDS_SECS.to_vec(),
+                )
                 .await
             {
                 Ok(backlog) => {

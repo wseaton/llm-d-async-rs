@@ -8,7 +8,7 @@ pub mod scrape;
 
 use std::collections::BTreeMap;
 
-use crate::gate::BoxFuture;
+use crate::boxed::BoxFuture;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {

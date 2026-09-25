@@ -1,257 +1,253 @@
-//! Durable queue state in an embedded redb database, with large bodies in
-//! blob files beside it.
+//! Durable queue state behind [`QueueStore`].
 //!
-//! One process owns the database file. That is what lets a claim be a plain
-//! row instead of a lease: whoever opens the store is the only possible owner,
-//! so every claim left behind by a previous process is returned to its queue.
+//! Two backends implement it:
+//!
+//! - [`embedded`]: redb in a local directory. One process owns it, so a claim
+//!   is a plain row and every claim a dead process held returns to its queue
+//!   when the store opens.
+//! - [`postgres`]: shared by any number of replicas. Each queue hashes into
+//!   partitions that replicas lease; a claim is fenced by its partition lease
+//!   and a per-dispatch attempt number.
+//!
+//! Request and result bodies live apart from the queue in a [`BlobStore`].
 
 pub mod blob;
+pub mod config;
+pub mod embedded;
 pub mod error;
-pub mod kv;
-pub mod requests;
-pub mod results;
+pub mod postgres;
+pub mod queue;
 pub mod staging;
-mod tables;
-
-use std::collections::BTreeSet;
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::time::Duration;
-
-use bytes::Bytes;
-use redb::{Database, ReadableDatabase, ReadableTable, WriteTransaction};
-
-use crate::api::payload::PayloadStorage;
-use crate::api::request::InternalRequest;
-use crate::store::blob::{BlobKey, BlobStore};
-use crate::store::error::StoreError;
-use crate::store::tables::{
-    ACTIVE, BLOBS, CANCELLED, CLAIMED, ClaimedRecord, KV, META, PAYLOADS, PENDING, RESULT_CLAIMS,
-    RESULTS, RETRY, TOMBSTONES,
-};
-
-const DB_FILE: &str = "llm-d-async.redb";
-const BLOB_DIR: &str = "blobs";
-
-#[derive(Debug, Clone)]
-pub struct StoreOptions {
-    /// How long a result body blob stays readable after its result is
-    /// taken by a destructive pop. Acknowledged claims delete it at once.
-    pub result_blob_retention: Duration,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Recovery {
-    /// Claims of a previous process returned to their queues.
-    pub claims: usize,
-    /// Blob files nothing referenced, deleted.
-    pub orphan_blobs: usize,
-}
-
-/// A request body opened for sending.
-pub enum PayloadBody {
-    Inline(Bytes),
-    File { file: tokio::fs::File, size: u64 },
-}
-
-#[derive(Clone)]
-pub struct Store {
-    db: Arc<Database>,
-    blobs: BlobStore,
-    next_claim_id: Arc<AtomicU64>,
-    result_blob_retention_ms: i64,
-}
-
-impl Store {
-    /// Opens (or creates) the store, returns every claim a previous process
-    /// left behind to its queue, and deletes unreferenced blob files.
-    pub fn open(dir: &Path, options: &StoreOptions) -> Result<(Self, Recovery), StoreError> {
-        std::fs::create_dir_all(dir)?;
-        let db = Database::create(dir.join(DB_FILE))?;
-        let blobs = BlobStore::open(&dir.join(BLOB_DIR))?;
-        let mut recovery = Recovery::default();
-        let referenced;
-        let txn = db.begin_write()?;
-        {
-            for_each_table(&txn)?;
-            recovery.claims = recover_claims(&txn)?;
-            referenced = referenced_blobs(&txn)?;
-        }
-        txn.commit()?;
-        for key in blobs.list()? {
-            if !referenced.contains(&key) {
-                blobs.remove(&key)?;
-                recovery.orphan_blobs += 1;
-            }
-        }
-        let result_blob_retention_ms =
-            i64::try_from(options.result_blob_retention.as_millis()).unwrap_or(i64::MAX);
-        Ok((
-            Self {
-                db: Arc::new(db),
-                blobs,
-                next_claim_id: Arc::new(AtomicU64::new(1)),
-                result_blob_retention_ms,
-            },
-            recovery,
-        ))
-    }
-
-    pub fn blobs(&self) -> &BlobStore {
-        &self.blobs
-    }
-
-    /// Runs blocking store work off the async runtime.
-    async fn run<T, F>(&self, f: F) -> Result<T, StoreError>
-    where
-        T: Send + 'static,
-        F: FnOnce(&Database) -> Result<T, StoreError> + Send + 'static,
-    {
-        let db = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || f(&db)).await?
-    }
-
-    /// Readiness probe: a read transaction succeeds.
-    pub async fn ping(&self) -> Result<(), StoreError> {
-        self.run(|db| {
-            let txn = db.begin_read()?;
-            txn.open_table(META)?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// Opens the body of a claimed request. `None` when it is missing.
-    pub async fn open_payload(
-        &self,
-        envelope: &InternalRequest,
-    ) -> Result<Option<PayloadBody>, StoreError> {
-        match envelope.payload.storage {
-            PayloadStorage::Inline => {
-                let generation = envelope.generation_key();
-                self.run(move |db| {
-                    let txn = db.begin_read()?;
-                    let payloads = txn.open_table(PAYLOADS)?;
-                    Ok(payloads
-                        .get(generation.as_str())?
-                        .map(|v| PayloadBody::Inline(Bytes::copy_from_slice(v.value()))))
-                })
-                .await
-            }
-            PayloadStorage::Blob => {
-                let Some(key) = BlobKey::request(&envelope.routing.request_token) else {
-                    return Ok(None);
-                };
-                Ok(self
-                    .blobs
-                    .open_file(&key)
-                    .await?
-                    .map(|(file, size)| PayloadBody::File { file, size }))
-            }
-        }
-    }
-}
-
-fn for_each_table(txn: &WriteTransaction) -> Result<(), StoreError> {
-    txn.open_table(PENDING)?;
-    txn.open_table(PAYLOADS)?;
-    txn.open_table(BLOBS)?;
-    txn.open_table(CLAIMED)?;
-    txn.open_table(RETRY)?;
-    txn.open_table(ACTIVE)?;
-    txn.open_table(CANCELLED)?;
-    txn.open_table(RESULTS)?;
-    txn.open_table(RESULT_CLAIMS)?;
-    txn.open_table(TOMBSTONES)?;
-    txn.open_table(KV)?;
-    txn.open_table(META)?;
-    Ok(())
-}
-
-fn recover_claims(txn: &WriteTransaction) -> Result<usize, StoreError> {
-    let mut claimed = txn.open_table(CLAIMED)?;
-    let mut pending = txn.open_table(PENDING)?;
-    let mut records = Vec::new();
-    for entry in claimed.iter()? {
-        let (key, value) = entry?;
-        match serde_json::from_str::<ClaimedRecord>(value.value()) {
-            Ok(record) => records.push(record),
-            Err(e) => {
-                tracing::error!(generation = key.value(), error = %e, "dropping undecodable claim")
-            }
-        }
-    }
-    for r in &records {
-        pending.insert((r.queue.as_str(), r.deadline, r.seq), r.envelope.as_str())?;
-    }
-    claimed.retain(|_, _| false)?;
-    Ok(records.len())
-}
-
-fn referenced_blobs(txn: &WriteTransaction) -> Result<BTreeSet<BlobKey>, StoreError> {
-    let blobs = txn.open_table(BLOBS)?;
-    let mut keys = BTreeSet::new();
-    for entry in blobs.iter()? {
-        let (key, _) = entry?;
-        if let Some(key) = BlobKey::parse(key.value()) {
-            keys.insert(key);
-        }
-    }
-    Ok(keys)
-}
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use std::collections::BTreeMap;
-    use std::time::Duration;
+pub(crate) mod conformance;
+#[cfg(test)]
+pub(crate) mod test_support;
 
-    use crate::api::request::{InternalRequest, RequestMessage};
-    use crate::api::routing::InternalRouting;
-    use crate::store::requests::NewRequest;
-    use crate::store::staging::StagedPayload;
-    use crate::store::{Store, StoreOptions};
+use std::sync::Arc;
 
-    pub fn options() -> StoreOptions {
-        StoreOptions {
-            result_blob_retention: Duration::from_secs(3600),
+use crate::api::dispatch_rate::DispatchRateLimit;
+use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
+use crate::store::blob::key::BlobKey;
+use crate::store::blob::{BlobBody, BlobStore};
+use crate::store::error::StoreError;
+use crate::store::queue::{
+    AckOutcome, Admission, Admitted, Applied, Backlog, NewRequest, Outcome, PayloadBody, Peeked,
+    ResultClaim,
+};
+
+pub type Store = Arc<dyn QueueStore>;
+
+pub trait QueueStore: Send + Sync {
+    fn blobs(&self) -> &BlobStore;
+
+    /// Readiness probe.
+    fn ping(&self) -> BoxFuture<'_, Result<(), StoreError>>;
+
+    /// Starts consuming `queue`, then tries to take this process's share of
+    /// it so the next [`QueueStore::peek`] can see requests. After an error
+    /// the queue stays joined and the backend keeps trying.
+    fn join(&self, queue: &str) -> BoxFuture<'_, Result<(), StoreError>>;
+
+    /// Stops consuming `queue`. Claims already taken stay valid until they
+    /// end.
+    fn leave(&self, queue: &str);
+
+    /// Enqueues requests whose payloads are already staged, all or none.
+    fn submit(&self, requests: Vec<NewRequest>) -> BoxFuture<'_, Result<(), StoreError>>;
+
+    /// Returns up to `limit` requests at the head of `queue` that this
+    /// process may claim, without claiming them. Never reads payloads.
+    fn peek(
+        &self,
+        queue: String,
+        limit: usize,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<Vec<Peeked>, StoreError>>;
+
+    /// Whether any request of `queue` is waiting, whoever may claim it.
+    fn has_pending(&self, queue: String, now_ms: i64) -> BoxFuture<'_, Result<bool, StoreError>>;
+
+    /// Applies a consumer's decisions for peeked rows of `queue` in one
+    /// transaction.
+    fn admit(
+        &self,
+        queue: String,
+        admissions: Vec<Admission>,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<Vec<Admitted>, StoreError>>;
+
+    /// Ends claims. Outcomes whose claim is not current are fenced; a result
+    /// body they reference is deleted.
+    fn apply_outcomes(
+        &self,
+        outcomes: Vec<Outcome>,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<Applied, StoreError>>;
+
+    /// Moves up to `limit` retries due at `now_ms` back to their queues and
+    /// returns how many moved. A backend that keeps retries in their queue
+    /// until due has nothing to move.
+    fn promote_due_retries(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<usize, StoreError>>;
+
+    /// Opens the body of a claimed request. `None` when it is missing.
+    fn open_payload<'a>(
+        &'a self,
+        envelope: &'a InternalRequest,
+    ) -> BoxFuture<'a, Result<Option<PayloadBody>, StoreError>>;
+
+    /// Whether this generation of a request was cancelled.
+    fn is_cancelled(
+        &self,
+        id: String,
+        token: String,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<bool, StoreError>>;
+
+    /// Marks the live generation of each ID cancelled. Unknown, finished and
+    /// expired IDs are a no-op. Returns how many IDs were marked.
+    fn cancel(&self, ids: Vec<String>, now_ms: i64) -> BoxFuture<'_, Result<usize, StoreError>>;
+
+    /// Depth of `queue` plus cumulative counts of requests whose deadline is
+    /// within each bound (seconds from `now_ms`).
+    fn backlog(
+        &self,
+        queue: String,
+        now_ms: i64,
+        bounds_s: Vec<i64>,
+    ) -> BoxFuture<'_, Result<Backlog, StoreError>>;
+
+    /// Destructively takes the oldest result of `route`. A body blob it
+    /// references stays readable for the result blob retention.
+    fn pop_result(
+        &self,
+        route: String,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<Option<String>, StoreError>>;
+
+    /// Leases the oldest result of `route` to `owner`. The result stays
+    /// durable until acknowledged and returns to the route if the lease lapses.
+    fn claim_result(
+        &self,
+        route: String,
+        owner: String,
+        lease_ms: i64,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<Option<ResultClaim>, StoreError>>;
+
+    /// Extends a live lease. False when `owner` no longer holds it.
+    fn renew_result(
+        &self,
+        route: String,
+        claim_id: u64,
+        owner: String,
+        lease_ms: i64,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<bool, StoreError>>;
+
+    /// Acknowledges a claimed result and deletes its body blob. Repeating a
+    /// successful ack is safe.
+    fn ack_result(
+        &self,
+        route: String,
+        claim_id: u64,
+        owner: String,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<AckOutcome, StoreError>>;
+
+    /// Opens a result body with its content type. `None` when it is unknown,
+    /// expired, or already deleted.
+    fn open_result_blob(
+        &self,
+        key: BlobKey,
+        now_ms: i64,
+    ) -> BoxFuture<'_, Result<Option<(BlobBody, String)>, StoreError>>;
+
+    /// Results waiting on `route`, excluding leased ones.
+    fn result_depth(&self, route: String, now_ms: i64) -> BoxFuture<'_, Result<u64, StoreError>>;
+
+    fn kv_get(&self, key: String) -> BoxFuture<'_, Result<Option<Vec<u8>>, StoreError>>;
+
+    /// Sets (`Some`) or clears (`None`) a control-plane value.
+    fn kv_put(&self, key: String, value: Option<Vec<u8>>) -> BoxFuture<'_, Result<(), StoreError>>;
+
+    /// Deletes expired markers, results, tombstones, and blobs. Returns rows
+    /// removed.
+    fn sweep(&self, now_ms: i64) -> BoxFuture<'_, Result<u64, StoreError>>;
+
+    /// Deletes blobs last written at or before `cutoff_ms` that nothing
+    /// references. Returns how many.
+    fn collect_orphans(&self, cutoff_ms: i64) -> BoxFuture<'_, Result<usize, StoreError>>;
+
+    /// Gives up everything this process holds so others can take it over.
+    /// Call once every outcome is written.
+    fn close(&self) -> BoxFuture<'_, Result<(), StoreError>>;
+}
+
+fn budget_key(key: &str) -> String {
+    format!("budget/{key}")
+}
+
+fn dispatch_rate_key(key: &str) -> String {
+    format!("dispatch-rate/{key}")
+}
+
+impl dyn QueueStore {
+    /// The raw budget value, as the operator wrote it.
+    pub async fn budget(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.kv_get(budget_key(key)).await
+    }
+
+    /// Sets (`Some`) or clears (`None`) a budget value.
+    pub async fn set_budget(&self, key: &str, value: Option<Vec<u8>>) -> Result<(), StoreError> {
+        self.kv_put(budget_key(key), value).await
+    }
+
+    /// The stored dispatch-rate command. `Err` in the inner result means the
+    /// stored bytes do not decode, which gates must treat as fail-closed.
+    pub async fn dispatch_rate(
+        &self,
+        key: &str,
+    ) -> Result<Option<Result<DispatchRateLimit, serde_json::Error>>, StoreError> {
+        Ok(self
+            .kv_get(dispatch_rate_key(key))
+            .await?
+            .map(|bytes| serde_json::from_slice(&bytes)))
+    }
+
+    pub async fn set_dispatch_rate(
+        &self,
+        key: &str,
+        limit: Option<&DispatchRateLimit>,
+    ) -> Result<(), StoreError> {
+        let value = limit.map(serde_json::to_vec).transpose()?;
+        self.kv_put(dispatch_rate_key(key), value).await
+    }
+}
+
+/// Holds a queue joined until dropped.
+pub struct Membership {
+    store: Store,
+    queue: String,
+}
+
+impl Membership {
+    pub async fn join(store: Store, queue: String) -> Self {
+        let membership = Self { store, queue };
+        if let Err(e) = membership.store.join(&membership.queue).await {
+            tracing::warn!(queue = %membership.queue, error = %e, "failed to take a share of the queue; retrying in the background");
         }
+        membership
     }
+}
 
-    pub fn open() -> (tempfile::TempDir, Store) {
-        let dir = tempfile::tempdir().unwrap();
-        let (store, recovery) = Store::open(dir.path(), &options()).unwrap();
-        assert_eq!(recovery.claims, 0);
-        (dir, store)
-    }
-
-    pub fn envelope(id: &str, token: &str, queue: &str, deadline: i64) -> InternalRequest {
-        InternalRequest {
-            routing: InternalRouting {
-                request_token: token.into(),
-                request_queue_name: queue.into(),
-                result_queue_name: "results".into(),
-                ..Default::default()
-            },
-            request: RequestMessage {
-                id: id.into(),
-                created: 0,
-                deadline,
-                metadata: BTreeMap::new(),
-                headers: BTreeMap::new(),
-                endpoint: String::new(),
-                model: String::new(),
-            },
-            payload: StagedPayload::Inline(Vec::new()).info("application/json"),
-        }
-    }
-
-    /// An inline-payload request whose token is the hex of its ID's bytes.
-    pub fn new_request(id: &str, queue: &str, deadline: i64) -> NewRequest {
-        let token: String = id.bytes().map(|b| format!("{b:02x}")).collect();
-        let payload = StagedPayload::Inline(format!(r#"{{"prompt":"{id}"}}"#).into_bytes());
-        let mut envelope = envelope(id, &token, queue, deadline);
-        envelope.payload = payload.info("application/json");
-        NewRequest { envelope, payload }
+impl Drop for Membership {
+    fn drop(&mut self) {
+        self.store.leave(&self.queue);
     }
 }

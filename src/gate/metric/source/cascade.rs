@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use crate::gate::BoxFuture;
+use crate::boxed::BoxFuture;
 use crate::gate::metric::source::{MetricSource, Sample, SourceError};
 
 /// Tries sources in order and returns the first non-empty reading. Logs only
@@ -57,7 +57,7 @@ impl MetricSource for CascadeSource {
 mod tests {
     use std::sync::Arc;
 
-    use crate::gate::BoxFuture;
+    use crate::boxed::BoxFuture;
     use crate::gate::metric::source::cascade::CascadeSource;
     use crate::gate::metric::source::{MetricSource, Sample, SourceError};
 

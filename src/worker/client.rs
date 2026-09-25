@@ -6,8 +6,9 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, RETR
 use crate::api::headers::DROPPED_REASON;
 use crate::api::payload::is_json_media_type;
 use crate::api::result::StoredBody;
-use crate::store::PayloadBody;
-use crate::store::blob::{BlobKey, BlobStore};
+use crate::store::blob::key::BlobKey;
+use crate::store::blob::{BlobError, BlobStore};
+use crate::store::queue::PayloadBody;
 
 /// How an inference failure is handled: retried, shed, or final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +102,7 @@ enum StoreBodyError {
     #[error("read response: {0}")]
     Read(#[from] reqwest::Error),
     #[error("write blob: {0}")]
-    Write(#[from] std::io::Error),
+    Write(#[from] BlobError),
 }
 
 pub struct InferenceClient {
@@ -138,13 +139,12 @@ impl InferenceClient {
     ) -> Result<InferenceResponse, Box<ClientError>> {
         let request = match payload {
             PayloadBody::Inline(bytes) => self.http.post(url).headers(headers).body(bytes),
-            PayloadBody::File { file, size } => {
-                headers.insert(CONTENT_LENGTH, HeaderValue::from(size));
-                let stream = tokio_util::io::ReaderStream::new(file);
+            PayloadBody::Blob(body) => {
+                headers.insert(CONTENT_LENGTH, HeaderValue::from(body.size));
                 self.http
                     .post(url)
                     .headers(headers)
-                    .body(reqwest::Body::wrap_stream(stream))
+                    .body(reqwest::Body::wrap_stream(body.stream))
             }
         };
         let mut response = request.send().await.map_err(|e| {
@@ -224,11 +224,11 @@ impl InferenceClient {
         content_type: &str,
         key: &BlobKey,
     ) -> Result<StoredBody, StoreBodyError> {
-        let mut writer = self.blobs.writer().await?;
+        let mut writer = self.blobs.create(key).await?;
         while let Some(chunk) = response.chunk().await? {
-            writer.write(&chunk).await?;
+            writer.write(chunk).await?;
         }
-        let digest = writer.commit(key).await?;
+        let digest = writer.commit().await?;
         Ok(StoredBody {
             payload_ref: key.to_ref(),
             content_type: content_type.to_owned(),

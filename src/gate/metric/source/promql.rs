@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::boxed::BoxFuture;
 use crate::clock::now_millis;
-use crate::gate::BoxFuture;
 use crate::gate::metric::source::{MetricSource, Sample, SourceError, parse_value};
 
 /// Evaluates one PromQL expression as an instant query.

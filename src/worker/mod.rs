@@ -21,9 +21,10 @@ use crate::gate::release::Releases;
 use crate::gate::{SharedGate, Verdict};
 use crate::merge::DispatchReceiver;
 use crate::merge::headers::Headers;
-use crate::store::blob::BlobKey;
-use crate::store::requests::Outcome;
-use crate::store::{PayloadBody, Store};
+use crate::store::Store;
+use crate::store::blob::key::BlobKey;
+use crate::store::queue::Outcome;
+use crate::store::queue::PayloadBody;
 use crate::telemetry::metrics::{GateReason, Metrics, QueueLabels};
 use crate::telemetry::propagation;
 use crate::worker::backoff::{
@@ -99,7 +100,7 @@ fn payload_model(payload: &PayloadBody) -> Option<String> {
     }
     match payload {
         PayloadBody::Inline(bytes) => serde_json::from_slice::<Model>(bytes).ok().map(|m| m.model),
-        PayloadBody::File { .. } => None,
+        PayloadBody::Blob(_) => None,
     }
 }
 
@@ -147,7 +148,10 @@ impl Worker {
             self.metrics.async_request(labels);
         }
 
-        let end = self.decide(&mut envelope, &url, &headers, labels).await;
+        let attempt = guard.claim_id();
+        let end = self
+            .decide(&mut envelope, &url, &headers, labels, attempt)
+            .await;
         match end {
             End::Finish(result) => guard.finish(|claim| Outcome::Finish {
                 claim,
@@ -173,6 +177,7 @@ impl Worker {
         url: &str,
         headers: &Headers,
         labels: &QueueLabels,
+        attempt: u64,
     ) -> End {
         let mut next_cancel_check = None;
         if let Some(end) = self.check_cancelled(envelope, &mut next_cancel_check).await {
@@ -210,7 +215,7 @@ impl Worker {
             return end;
         }
         let _inflight = Inflight::start(&self.metrics, labels);
-        self.send(envelope, url, headers, labels).await
+        self.send(envelope, url, headers, labels, attempt).await
     }
 
     /// `Some` when the request was cancelled, or when cancellation could not
@@ -320,6 +325,7 @@ impl Worker {
         url: &str,
         headers: &Headers,
         labels: &QueueLabels,
+        attempt: u64,
     ) -> End {
         let id = envelope.request.id.clone();
         let retry_count = envelope.routing.retry_count;
@@ -339,7 +345,7 @@ impl Worker {
             otel.status_code = tracing::field::Empty,
         );
         propagation::set_parent_from_metadata(&span, &envelope.request.metadata);
-        self.send_in_span(envelope, url, headers, labels, &span)
+        self.send_in_span(envelope, url, headers, labels, attempt, &span)
             .instrument(span.clone())
             .await
     }
@@ -350,6 +356,7 @@ impl Worker {
         url: &str,
         headers: &Headers,
         labels: &QueueLabels,
+        attempt: u64,
         span: &tracing::Span,
     ) -> End {
         let request_deadline = deadline_instant(envelope.request.deadline)
@@ -391,7 +398,7 @@ impl Worker {
             }
         };
         propagation::inject_current(&mut header_map);
-        let Some(result_key) = BlobKey::result(&envelope.routing.request_token) else {
+        let Some(result_key) = BlobKey::result(&envelope.routing.request_token, attempt) else {
             self.metrics.failed(labels);
             return End::Finish(ResultMessage::error(
                 envelope,
@@ -405,11 +412,11 @@ impl Worker {
         let started = Instant::now();
         let sent = tokio::select! {
             biased;
-            () = self.drain.cancelled() => return End::Release,
             sent = timeout_at(
                 request_deadline,
                 self.client.send(url, header_map, payload, &result_key),
             ) => sent,
+            () = self.drain.cancelled() => return End::Release,
         };
         self.metrics
             .inference_latency(labels, started.elapsed().as_millis() as f64);

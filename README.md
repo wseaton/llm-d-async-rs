@@ -1,18 +1,24 @@
 # llm-d-async (Rust)
 
 An asynchronous dispatch processor for llm-d. Producers submit requests over
-HTTP. They wait in durable queues in an embedded [redb](https://github.com/cberner/redb)
-store, pass dispatch gates that watch system capacity, and go to an inference
-gateway (`llm-d-router` or any OpenAI-compatible endpoint). Results come back
-through the same API.
+HTTP. They wait in durable queues, pass dispatch gates that watch system
+capacity, and go to an inference gateway (`llm-d-router` or any
+OpenAI-compatible endpoint). Results come back through the same API.
+
+Queues live in one of two stores:
+
+- **embedded**: [redb](https://github.com/cberner/redb) in a local directory,
+  owned by one process. No other service.
+- **postgres**: shared by any number of replicas, which split each queue
+  between them and take over each other's work.
 
 This is a rewrite of the Go processor. The Redis and Pub/Sub transports are
-replaced by the embedded store, and the processor owns its queues. Gates,
-merge policies, retries, deadlines, metrics, and tracing match the Go version
+replaced by these stores, and the processor owns its queues. Gates, merge
+policies, retries, deadlines, metrics, and tracing match the Go version
 except where noted under [Differences from the Go processor](#differences-from-the-go-processor).
 
 ```text
- producers ──HTTP──► store (redb + blob files)
+ producers ──HTTP──► store (redb or Postgres, + blob store)
                         │ per queue: peek → queue gate → claim
                         ▼
                  merge policy (per pool) ──► workers ──pool gate──► inference gateway
@@ -31,17 +37,74 @@ cargo run --release -- \
   --request-merge-policy-config-file merge.json
 ```
 
-One process owns a data directory. A claim is a row in the store, not a lease.
-When the store opens, every claim the previous process held goes back to its
-queue, so delivery is at-least-once across crashes. Graceful shutdown (SIGTERM)
-stops claiming, lets in-flight requests finish for `--drain-timeout`, and puts
-the rest back in their queues.
+With Postgres, run as many replicas as you like against one database:
+
+```sh
+cargo run --release -- \
+  --store postgres --database-url postgres://user@db/llm_d_async \
+  --blob-store s3://bucket/llm-d-async \
+  --transport-config-file transport.json
+```
+
+Delivery is at-least-once across crashes on either store. Graceful shutdown
+(SIGTERM) stops claiming, lets in-flight requests finish for
+`--drain-timeout`, puts the rest back in their queues, and (on Postgres)
+hands the process's partitions to the other replicas at once.
+
+## Stores and replicas
+
+**Embedded.** One process owns the data directory. A claim is a row, not a
+lease: whoever opens the store is its only owner, so every claim the previous
+process held goes back to its queue on open. To scale out, give each replica
+its own directory and its own queues.
+
+**Postgres.** Each queue hashes its requests into 64 partitions. Every
+replica consuming a queue heartbeats a membership row and leases its share,
+`ceil(64 / live replicas)`, of the partitions; it only claims requests in
+partitions it holds. When a replica joins, the others drain partitions down
+to their new share (a draining partition takes no new work, and is released
+once its claims finish or `--partition-handoff-timeout` passes). When a
+replica dies, its leases lapse after `--partition-lease-ttl` and the
+survivors take its partitions and redeliver what it held.
+
+Every claim is fenced twice: by its partition lease and by an attempt number
+drawn for each dispatch. An outcome from a replica that lost its lease, or
+from an earlier dispatch of the same request, changes nothing. This is the
+design of the Go SQL transport (llm-d-async#452), including its reconcile of
+claims whose reply was lost.
+
+Quota gates (`quota`), leased-rate buckets (`leased-rate`), and budget keys
+count in the database, so limits hold across replicas. Concurrency slots are
+counted per heartbeated holder: a dead replica's slots free themselves when
+its holder lapses. Every replica reports the whole queue's depth and
+deadline proximity, so aggregate those metrics with `max`, not `sum`.
+
+**Blob stores.** Request bodies over `--inline-payload-limit` and binary
+results are stored apart from the queue:
+
+| `--blob-store` | where | with |
+|---|---|---|
+| `local` (embedded default) | files under `--data-dir/blobs` | embedded only |
+| `postgres` (Postgres default) | 1 MiB rows in the same database | Postgres only |
+| `s3://bucket/prefix`, `gs://…`, `az://…`, `file:///…` | an object store | Postgres only |
+
+Object store credentials come from the provider's usual environment variables
+(`AWS_*`, `GOOGLE_*`, `AZURE_*`). The store deletes blobs nothing references
+(uploads whose submission failed, deletes that failed) an hour after they
+were written. Set a lifecycle rule to abort incomplete multipart uploads.
 
 ### Flags
 
 | flag | default | |
 |---|---|---|
-| `--data-dir` | `data` | store and blob files |
+| `--store` | `embedded` | `embedded` or `postgres` |
+| `--data-dir` | `data` | embedded store and local blobs |
+| `--database-url` / `DATABASE_URL` | | Postgres URL; TLS follows its `sslmode` |
+| `--database-max-connections` | 32 | per replica |
+| `--database-ca-cert` | | extra CA for Postgres (native TLS) |
+| `--partition-lease-ttl` | 30s | how long a dead replica's partitions and quota slots stay held |
+| `--partition-handoff-timeout` | 15m | longest a draining partition waits for its claims |
+| `--blob-store` | per store | see [Blob stores](#stores-and-replicas) |
 | `--api-addr` | `0.0.0.0:8080` | producer/consumer API |
 | `--health-port` / `--metrics-port` | 8081 / 9090 | `/healthz`, `/readyz` / `/metrics` |
 | `--concurrency` | 64 | workers in the default pool when no pool file is given |
@@ -107,9 +170,17 @@ are streamed to the gateway exactly as submitted.
 | `POST /v1/results/{route}/claims/{id}/ack` | `{"owner_token"}`; idempotent; deletes the result's body blob |
 | `POST /v1/results/{route}/pop?wait_ms=` | destructive take (no ack) |
 | `GET /v1/results/{route}/depth` | |
-| `GET /v1/blobs/results/{token}` | a result body stored by reference |
+| `GET /v1/blobs/results/{name}` | a result body stored by reference; `name` is the tail of its `payload_ref`, `<token>-<attempt>` |
 | `PUT/GET/DELETE /v1/admin/budgets/{key}` | budget for `budget-key` gates (JSON number) |
 | `PUT/GET/DELETE /v1/admin/dispatch-rates/{key}` | leased `DispatchRateLimit` for `leased-rate` gates |
+
+A Go client lives in [`clients/go`](clients/go)
+(`github.com/wseaton/llm-d-async-rs/clients/go`). Its `Client` satisfies
+`producer.Producer` from the Go repo, so code written against the Redis
+producer switches by construction alone, and adds batch and streamed
+submission, leased delivery (`ReceiveResult`/`RenewResult`/`AckResult`), and
+`OpenResultBody` for results stored by reference. Its tests run the real
+binary on both stores.
 
 Results use the Go `ResultMessage` wire format. A 2xx response whose media
 type is not JSON (audio, images, anything binary) is streamed into a blob, and
@@ -128,9 +199,9 @@ share a `prefix` share per-tenant counters, as they shared Redis keys before.
 
 ## Differences from the Go processor
 
-- **No Redis, no Pub/Sub.** One process per data directory. There are no
-  multiple replicas sharing a queue; scale by giving each replica its own
-  queues.
+- **No Redis, no Pub/Sub.** Queues live in the embedded store (one process)
+  or Postgres (many replicas, split by partition leases instead of Redis
+  claim leases).
 - **Unknown `gate_type` is a startup error.** Go silently used an open gate,
   so a typo disabled flow control.
 - **Queue-level `Wait` keeps the request queued.** Go dispatched it.
@@ -161,10 +232,27 @@ cargo test                  # unit tests
 cargo test --test e2e       # the binary against a stand-in gateway
 ```
 
+Postgres tests need `TEST_DATABASE_URL`, a database where they may create
+schemas (each test gets its own). Without it they are skipped; CI sets
+`REQUIRE_POSTGRES=1` so they cannot be. A throwaway cluster:
+
+```sh
+initdb -D /tmp/pg -U postgres --auth=trust
+pg_ctl -D /tmp/pg -o "-p 55432 -k '' -c listen_addresses=127.0.0.1" start
+createdb -h 127.0.0.1 -p 55432 -U postgres lda_test
+export TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/lda_test
+```
+
+Every store backend runs the same conformance suite
+(`src/store/conformance.rs`), as does every counter backend
+(`src/gate/admission/counters/conformance.rs`).
+
 The e2e suite starts the real binary on real ports with a real store. It
 covers the JSON and multipart paths, results by reference, lease redelivery,
 retries and shedding, cancellation and deadlines, every gate family,
 tier-priority lane order, SIGKILL recovery, graceful drain, drain timeout, and
-hot reload. The gateway, the Prometheus query API, and the scraped `/metrics`
+hot reload; and, on Postgres, replicas splitting a queue, SIGKILL failover,
+SIGTERM handoff, a tenant quota across replicas, and large bodies crossing
+replicas through both shared blob stores. The gateway, the Prometheus query API, and the scraped `/metrics`
 page are a real HTTP server standing in for vLLM and Prometheus. Set
 `E2E_LOG=debug` for processor logs.

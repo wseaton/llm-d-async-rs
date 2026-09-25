@@ -15,15 +15,12 @@ pub mod factory;
 pub mod metric;
 pub mod release;
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::api::request::InternalRequest;
 use crate::api::result::ResultMessage;
+use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -87,8 +84,9 @@ pub(crate) mod test_support {
 
     use crate::api::request::{InternalRequest, RequestMessage};
     use crate::api::routing::InternalRouting;
+    use crate::boxed::BoxFuture;
     use crate::gate::release::Releases;
-    use crate::gate::{BoxFuture, Gate, Verdict};
+    use crate::gate::{Gate, Verdict};
 
     pub fn request(metadata: &[(&str, &str)]) -> InternalRequest {
         InternalRequest {

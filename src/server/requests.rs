@@ -8,12 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::api::payload::JSON_CONTENT_TYPE;
 use crate::api::request::{InternalRequest, SubmitRequest};
 use crate::api::routing::InternalRouting;
-use crate::clock::{now_millis, now_secs};
+use crate::clock::now_millis;
 use crate::dispatch::queues::labels_of;
 use crate::server::AppState;
 use crate::server::error::ApiError;
-use crate::store::blob::{BlobKey, BlobStore};
-use crate::store::requests::NewRequest;
+use crate::store::blob::BlobStore;
+use crate::store::blob::key::BlobKey;
+use crate::store::queue::NewRequest;
 use crate::store::staging::{PayloadSink, StagedPayload};
 
 /// Largest `request` part of a multipart submission.
@@ -35,10 +36,10 @@ fn bad(e: impl std::fmt::Display) -> ApiError {
     ApiError::BadRequest(e.to_string())
 }
 
-/// Blob files staged for submissions that have not committed yet. Dropped
-/// before [`StagedBlobs::committed`], it deletes them, so a failed or
-/// abandoned submission (a client that disconnects mid-request) leaves
-/// nothing behind.
+/// Blobs staged for submissions that have not committed yet. Dropped before
+/// [`StagedBlobs::committed`], it deletes them, so a failed or abandoned
+/// submission (a client that disconnects mid-request) leaves nothing behind.
+/// An upload cut off before it finished discards itself.
 struct StagedBlobs {
     blobs: BlobStore,
     keys: Vec<BlobKey>,
@@ -52,12 +53,9 @@ impl StagedBlobs {
         }
     }
 
-    /// Tracks the blob a submission with `token` may stage. Tracking comes
-    /// before staging, so even a half-written blob is covered; deleting a
-    /// blob that was never written is a no-op.
-    fn track(&mut self, token: &str) {
-        if let Some(key) = BlobKey::request(token) {
-            self.keys.push(key);
+    fn track(&mut self, payload: &StagedPayload) {
+        if let StagedPayload::Blob { key, .. } = payload {
+            self.keys.push(key.clone());
         }
     }
 
@@ -68,13 +66,14 @@ impl StagedBlobs {
 
 impl Drop for StagedBlobs {
     fn drop(&mut self) {
-        self.blobs.remove_dropped(&self.keys);
+        self.blobs.spawn_remove(std::mem::take(&mut self.keys));
     }
 }
 
-fn sink(state: &AppState) -> PayloadSink {
+fn sink(state: &AppState, token: &str) -> PayloadSink {
     PayloadSink::new(
         state.store.blobs().clone(),
+        token,
         state.limits.inline,
         state.limits.max,
     )
@@ -144,10 +143,10 @@ async fn from_json(
     let token = new_token();
     let mut envelope = envelope(state, &sub, &token).await?;
     let raw = sub.payload.as_ref().map_or("null", |p| p.get());
-    staged.track(&token);
-    let mut sink = sink(state);
+    let mut sink = sink(state, &token);
     sink.push(raw.as_bytes()).await?;
-    let payload = sink.finish(&token).await?;
+    let payload = sink.finish().await?;
+    staged.track(&payload);
     envelope.payload = payload.info(JSON_CONTENT_TYPE);
     Ok(NewRequest { envelope, payload })
 }
@@ -160,7 +159,6 @@ async fn from_multipart(
     staged: &mut StagedBlobs,
 ) -> Result<NewRequest, ApiError> {
     let token = new_token();
-    staged.track(&token);
     let mut sub: Option<SubmitRequest> = None;
     let mut payload: Option<(StagedPayload, String)> = None;
     while let Some(mut field) = multipart.next_field().await.map_err(bad)? {
@@ -186,11 +184,13 @@ async fn from_multipart(
                     .content_type()
                     .unwrap_or(DEFAULT_PAYLOAD_CONTENT_TYPE)
                     .to_owned();
-                let mut sink = sink(state);
+                let mut sink = sink(state, &token);
                 while let Some(chunk) = field.chunk().await.map_err(bad)? {
                     sink.push(&chunk).await?;
                 }
-                payload = Some((sink.finish(&token).await?, content_type));
+                let staged_payload = sink.finish().await?;
+                staged.track(&staged_payload);
+                payload = Some((staged_payload, content_type));
             }
             other => return Err(bad(format!("unexpected part {other:?}"))),
         }
@@ -213,7 +213,9 @@ fn submitted(r: &NewRequest) -> Submitted {
 }
 
 /// Commits submissions in a task of its own: a client that disconnects now
-/// cannot separate the commit from the fate of its staged blobs.
+/// cannot separate the commit from the fate of its staged blobs. A failed
+/// commit may still have landed (a lost reply), so its blobs are left for
+/// orphan collection, which deletes them only if nothing references them.
 async fn commit(
     state: &AppState,
     requests: Vec<NewRequest>,
@@ -221,9 +223,9 @@ async fn commit(
 ) -> Result<(), ApiError> {
     let store = state.store.clone();
     tokio::spawn(async move {
-        store.submit(requests).await?;
+        let submitted = store.submit(requests).await;
         staged.committed();
-        Ok::<(), ApiError>(())
+        submitted.map_err(ApiError::from)
     })
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -307,7 +309,7 @@ pub async fn list_queues(
     for config in state.queues.snapshot().await {
         let backlog = state
             .store
-            .backlog(config.queue_name.clone(), now_secs(), Vec::new())
+            .backlog(config.queue_name.clone(), now_millis(), Vec::new())
             .await?;
         let labels = labels_of(&config);
         out.push(QueueStatus {

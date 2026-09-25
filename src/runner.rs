@@ -5,7 +5,8 @@
 //! 2. merge tasks stop; buffered claims return to their queues;
 //! 3. in-flight requests get `--drain-timeout` to finish, then are aborted
 //!    and returned to their queues;
-//! 4. the outcome writer drains and the store closes; the API stays up
+//! 4. the outcome writer drains and the store closes, giving up any queue
+//!    partitions so other replicas take them over at once; the API stays up
 //!    until then so result consumers are not cut off.
 
 use std::collections::HashMap;
@@ -30,8 +31,8 @@ use crate::dispatch::{backlog, reload, upkeep, writer};
 use crate::gate::factory::{GateConfigError, GateFactory};
 use crate::merge::{self, PoolSpec};
 use crate::server::{self, AppState, PayloadLimits};
+use crate::store::Store;
 use crate::store::error::StoreError;
-use crate::store::{Store, StoreOptions};
 use crate::telemetry::metrics::{Metrics, QueueLabels};
 use crate::tls::{self, TlsError};
 use crate::worker::Worker;
@@ -111,21 +112,13 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
     for pool in pools.iter() {
         metrics.pool_worker_limit(&pool.id, pool.workers);
     }
-    let (store, recovery) = Store::open(
-        &cli.data_dir,
-        &StoreOptions {
-            result_blob_retention: cli.result_blob_retention,
-        },
-    )?;
-    tracing::info!(
-        data_dir = %cli.data_dir.display(),
-        recovered_claims = recovery.claims,
-        orphan_blobs = recovery.orphan_blobs,
-        "store opened"
-    );
+    let results = Arc::new(Notify::new());
+    let opened = cli.store_config()?.open(Arc::clone(&results)).await?;
+    let store = opened.store;
 
     let factory = Arc::new(GateFactory::new(
         store.clone(),
+        opened.counters,
         Arc::clone(&metrics),
         prometheus,
         cli.prometheus_cache_ttl,
@@ -140,7 +133,6 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
     let stop_servers = CancellationToken::new();
     let background = TaskTracker::new();
     let workers = TaskTracker::new();
-    let results = Arc::new(Notify::new());
 
     let mut queues_per_pool: HashMap<&str, usize> = HashMap::new();
     for q in &transport.queues {
@@ -237,6 +229,9 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
         drain.cancel();
         queues.stop().await;
         stop_servers.cancel();
+        if let Err(close) = store.close().await {
+            tracing::error!(error = %close, "failed to close the store cleanly");
+        }
         return Err(e);
     }
 
@@ -265,6 +260,9 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
     drop(queues);
     if let Err(e) = writer.await {
         tracing::error!(error = %e, "outcome writer failed");
+    }
+    if let Err(e) = store.close().await {
+        tracing::error!(error = %e, "failed to close the store cleanly");
     }
     stop_servers.cancel();
     servers.close();
@@ -337,6 +335,7 @@ async fn start(
         consume.clone(),
     ));
     background.spawn(upkeep::sweep(store.clone(), consume.clone()));
+    background.spawn(upkeep::collect_orphans(store.clone(), consume.clone()));
     if !cli.metrics_backlog_poll_interval.is_zero() {
         background.spawn(backlog::run(
             store.clone(),

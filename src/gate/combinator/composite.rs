@@ -1,6 +1,7 @@
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, SharedGate, Verdict, apply_chain};
+use crate::gate::{Gate, SharedGate, Verdict, apply_chain};
 
 /// All inner gates must admit; the budget is the smallest inner budget.
 pub struct CompositeGate {

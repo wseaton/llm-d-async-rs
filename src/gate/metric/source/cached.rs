@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::gate::BoxFuture;
+use crate::boxed::BoxFuture;
 use crate::gate::metric::source::{MetricSource, Sample, SourceError};
 
 type Reading = Result<Vec<Sample>, SourceError>;
@@ -48,7 +48,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use crate::gate::BoxFuture;
+    use crate::boxed::BoxFuture;
     use crate::gate::metric::source::cached::CachedSource;
     use crate::gate::metric::source::{MetricSource, Sample, SourceError};
 

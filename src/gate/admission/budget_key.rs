@@ -1,6 +1,7 @@
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, Verdict, budget_verdict};
+use crate::gate::{Gate, Verdict, budget_verdict};
 use crate::store::Store;
 
 /// Reads its budget from a store key an operator or controller sets through
@@ -54,7 +55,7 @@ impl Gate for BudgetKeyGate {
 mod tests {
     use crate::gate::Gate;
     use crate::gate::admission::budget_key::{BudgetKeyGate, parse_budget};
-    use crate::store::test_support::open;
+    use crate::store::embedded::test_support::open;
 
     #[test]
     fn parses_and_clamps() {
@@ -68,7 +69,8 @@ mod tests {
 
     #[tokio::test]
     async fn reads_the_store() {
-        let (_dir, store) = open();
+        let fixture = open().await;
+        let store = fixture.store.clone();
         let g = BudgetKeyGate::new(store.clone(), "k".into());
         assert_eq!(g.budget().await, 1.0);
         store.set_budget("k", Some(b"0".to_vec())).await.unwrap();

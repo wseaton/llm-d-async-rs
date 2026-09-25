@@ -20,8 +20,7 @@
 
 pub mod params;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::Url;
@@ -30,9 +29,10 @@ use crate::config::transport::GateParams;
 use crate::gate::SharedGate;
 use crate::gate::admission::GatingMode;
 use crate::gate::admission::budget_key::BudgetKeyGate;
-use crate::gate::admission::leased_rate::{Buckets, LeasedRateGate};
+use crate::gate::admission::counters::Counters;
+use crate::gate::admission::leased_rate::LeasedRateGate;
 use crate::gate::admission::local_concurrency::LocalConcurrencyGate;
-use crate::gate::admission::quota::{QuotaGate, QuotaMode, QuotaState};
+use crate::gate::admission::quota::{QuotaGate, QuotaMode};
 use crate::gate::combinator::composite::CompositeGate;
 use crate::gate::combinator::tier_admission::TierAdmissionGate;
 use crate::gate::combinator::wait_on_refuse::WaitOnRefuseGate;
@@ -70,31 +70,30 @@ fn param_err(gate: &str) -> impl Fn(String) -> GateConfigError + '_ {
 
 pub struct GateFactory {
     store: Store,
+    counters: Arc<dyn Counters>,
     metrics: Arc<Metrics>,
     http: reqwest::Client,
     prometheus: Option<Url>,
     cache_ttl: Duration,
-    quotas: Mutex<HashMap<(String, QuotaMode), Arc<QuotaState>>>,
-    buckets: Arc<Buckets>,
 }
 
 impl GateFactory {
     pub fn new(
         store: Store,
+        counters: Arc<dyn Counters>,
         metrics: Arc<Metrics>,
         prometheus: Option<Url>,
         cache_ttl: Duration,
     ) -> Result<Self, GateConfigError> {
         Ok(Self {
             store,
+            counters,
             metrics,
             http: reqwest::Client::builder()
                 .timeout(PROMETHEUS_TIMEOUT)
                 .build()?,
             prometheus,
             cache_ttl,
-            quotas: Mutex::new(HashMap::new()),
-            buckets: Arc::new(Buckets::default()),
         })
     }
 
@@ -191,7 +190,7 @@ impl GateFactory {
         if gate_type.starts_with("redis") {
             tracing::warn!(
                 gate_type,
-                "Redis gate type is an alias for the embedded-store gate; 'address' is ignored"
+                "Redis gate type is an alias for the store-backed gate; 'address' is ignored"
             );
         }
         Ok(gate)
@@ -223,7 +222,7 @@ impl GateFactory {
             format!("mode must be 'rate-limit' or 'concurrency', got {mode_name:?}")
         })?;
         let limit = p.int("limit", 0)?;
-        let limit = usize::try_from(limit)
+        let limit = u32::try_from(limit)
             .ok()
             .filter(|l| *l > 0)
             .ok_or_else(|| format!("requires a positive 'limit', got {limit}"))?;
@@ -232,21 +231,14 @@ impl GateFactory {
             return Err("rate-limit mode requires a positive 'window'".into());
         }
         let gating = gating_mode(p, GatingMode::Blocking)?;
-        let prefix = p.string("prefix", "quota:");
-        let state = {
-            let mut quotas = self
-                .quotas
-                .lock()
-                .map_err(|_| "quota registry poisoned".to_owned())?;
-            Arc::clone(quotas.entry((prefix, mode)).or_default())
-        };
         Ok(Arc::new(QuotaGate::new(
             p.string("attribute", "userid"),
+            p.string("prefix", "quota:"),
             mode,
             gating,
             limit,
             window,
-            state,
+            Arc::clone(&self.counters),
         )))
     }
 
@@ -269,7 +261,7 @@ impl GateFactory {
             state_key,
             pool_id,
             burst_seconds,
-            Arc::clone(&self.buckets),
+            Arc::clone(&self.counters),
             Arc::clone(&self.metrics),
         )))
     }
@@ -384,31 +376,33 @@ mod tests {
 
     use crate::config::transport::GateParams;
     use crate::gate::Verdict;
+    use crate::gate::admission::counters::local::LocalCounters;
     use crate::gate::factory::{GateConfigError, GateFactory};
     use crate::gate::release::Releases;
     use crate::gate::test_support::request;
-    use crate::store::test_support::open;
+    use crate::store::embedded::test_support::{Fixture, open};
     use crate::telemetry::metrics::{Metrics, QueueLabels};
 
     fn params(v: serde_json::Value) -> GateParams {
         v.as_object().unwrap().clone()
     }
 
-    fn factory(prometheus: Option<&str>) -> (tempfile::TempDir, GateFactory) {
-        let (dir, store) = open();
+    async fn factory(prometheus: Option<&str>) -> (Fixture, GateFactory) {
+        let fixture = open().await;
         let f = GateFactory::new(
-            store,
+            fixture.store.clone(),
+            Arc::new(LocalCounters::default()),
             Arc::new(Metrics::new().unwrap()),
             prometheus.map(|u| u.parse().unwrap()),
             Duration::from_secs(5),
         )
         .unwrap();
-        (dir, f)
+        (fixture, f)
     }
 
     #[tokio::test]
     async fn builds_every_gate_type() {
-        let (_dir, f) = factory(Some("http://prom:9090"));
+        let (_dir, f) = factory(Some("http://prom:9090")).await;
         let owner = QueueLabels::new("q", "queue", "pool");
         let cases = [
             ("", json!({})),
@@ -464,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_bad_configs() {
-        let (_dir, f) = factory(None);
+        let (_dir, f) = factory(None).await;
         let owner = QueueLabels::pool("pool");
         let cases: &[(&str, serde_json::Value, &str)] = &[
             ("nope", json!({}), "unknown gate_type"),
@@ -523,7 +517,7 @@ mod tests {
                 .unwrap();
             assert!(e.to_string().contains(want), "{gate_type} {p}: {e}");
         }
-        let (_dir, f) = factory(Some("http://prom"));
+        let (_dir, f) = factory(Some("http://prom")).await;
         let e = f
             .create(
                 "prometheus-budget",
@@ -545,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn quota_gates_with_one_prefix_share_counters() {
-        let (_dir, f) = factory(None);
+        let (_dir, f) = factory(None).await;
         let p = params(json!({"limit": 1, "mode": "concurrency"}));
         let a = f.create("quota", &p, &QueueLabels::default()).unwrap();
         let b = f.create("quota", &p, &QueueLabels::default()).unwrap();

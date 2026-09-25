@@ -3,6 +3,7 @@
 //! forwards requests to an inference gateway.
 
 pub mod api;
+pub mod boxed;
 pub mod clock;
 pub mod config;
 pub mod dispatch;

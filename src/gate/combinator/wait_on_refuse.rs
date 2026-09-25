@@ -1,6 +1,7 @@
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, SharedGate, Verdict};
+use crate::gate::{Gate, SharedGate, Verdict};
 
 /// Turns the inner gate's `Refuse` into `Wait`, so a pool-level gate parks
 /// the worker instead of returning the request to its queue.

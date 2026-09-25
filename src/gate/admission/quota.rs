@@ -1,12 +1,13 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::api::request::InternalRequest;
 use crate::api::routing::Classification;
+use crate::boxed::BoxFuture;
 use crate::gate::admission::GatingMode;
+use crate::gate::admission::counters::Counters;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, Verdict};
+use crate::gate::{Gate, Verdict};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QuotaMode {
@@ -26,122 +27,70 @@ impl QuotaMode {
     }
 }
 
-/// Per-tenant counters. Every quota gate built with the same prefix and mode
-/// shares one, so several queues can draw on one tenant quota.
-#[derive(Default)]
-pub struct QuotaState {
-    in_flight: Mutex<HashMap<String, usize>>,
-    admissions: Mutex<RateWindows>,
-}
-
-#[derive(Default)]
-struct RateWindows {
-    by_tenant: HashMap<String, VecDeque<Instant>>,
-    last_sweep: Option<Instant>,
-}
-
-impl RateWindows {
-    fn admit(&mut self, tenant: &str, limit: usize, window: Duration, now: Instant) -> bool {
-        let cutoff = now.checked_sub(window);
-        let prune = |q: &mut VecDeque<Instant>| {
-            while q.front().is_some_and(|t| Some(*t) <= cutoff) {
-                q.pop_front();
-            }
-        };
-        if self
-            .last_sweep
-            .is_none_or(|at| now.duration_since(at) >= window)
-        {
-            self.by_tenant.retain(|_, q| {
-                prune(q);
-                !q.is_empty()
-            });
-            self.last_sweep = Some(now);
-        }
-        let q = self.by_tenant.entry(tenant.to_owned()).or_default();
-        prune(q);
-        if q.len() >= limit {
-            return false;
-        }
-        q.push_back(now);
-        true
-    }
-}
-
 /// Classifies each request as within (`reserved`) or over (`overflow`) its
 /// tenant's quota. The tenant is the metadata value under `attribute`;
-/// requests without it are admitted untouched.
+/// requests without it are admitted untouched. Gates with the same `prefix`
+/// count against the same per-tenant keys. A counter that cannot be read
+/// counts as overflow.
 pub struct QuotaGate {
     attribute: String,
+    prefix: String,
     mode: QuotaMode,
     gating: GatingMode,
-    limit: usize,
+    limit: u32,
     window: Duration,
-    state: Arc<QuotaState>,
+    counters: Arc<dyn Counters>,
 }
 
 impl QuotaGate {
     pub fn new(
         attribute: String,
+        prefix: String,
         mode: QuotaMode,
         gating: GatingMode,
-        limit: usize,
+        limit: u32,
         window: Duration,
-        state: Arc<QuotaState>,
+        counters: Arc<dyn Counters>,
     ) -> Self {
         Self {
             attribute,
+            prefix,
             mode,
             gating,
             limit,
             window,
-            state,
+            counters,
         }
     }
 
-    fn acquire(&self, tenant: &str, releases: &mut Releases, now: Instant) -> Classification {
-        match self.mode {
-            QuotaMode::Concurrency => {
-                let Ok(mut in_flight) = self.state.in_flight.lock() else {
-                    return Classification::Overflow;
-                };
-                let count = in_flight.entry(tenant.to_owned()).or_default();
-                if *count >= self.limit {
-                    return Classification::Overflow;
+    async fn acquire(&self, tenant: &str, releases: &mut Releases) -> Classification {
+        let key = format!("{}{tenant}", self.prefix);
+        let admitted = match self.mode {
+            QuotaMode::Concurrency => match self.counters.acquire_slot(key, self.limit).await {
+                Ok(Some(slot)) => {
+                    releases.push(move || drop(slot));
+                    Ok(true)
                 }
-                *count += 1;
-                let state = Arc::clone(&self.state);
-                let tenant = tenant.to_owned();
-                releases.push(move || {
-                    if let Ok(mut in_flight) = state.in_flight.lock()
-                        && let Some(count) = in_flight.get_mut(&tenant)
-                    {
-                        *count = count.saturating_sub(1);
-                        if *count == 0 {
-                            in_flight.remove(&tenant);
-                        }
-                    }
-                });
-                Classification::Reserved
-            }
-            QuotaMode::RateLimit => {
-                let Ok(mut windows) = self.state.admissions.lock() else {
-                    return Classification::Overflow;
-                };
-                if windows.admit(tenant, self.limit, self.window, now) {
-                    Classification::Reserved
-                } else {
-                    Classification::Overflow
-                }
+                Ok(None) => Ok(false),
+                Err(e) => Err(e),
+            },
+            QuotaMode::RateLimit => self.counters.admit(key, self.limit, self.window).await,
+        };
+        match admitted {
+            Ok(true) => Classification::Reserved,
+            Ok(false) => Classification::Overflow,
+            Err(e) => {
+                tracing::warn!(%tenant, error = %e, "quota counter unavailable; treating as overflow");
+                Classification::Overflow
             }
         }
     }
 
-    fn decide(&self, msg: &mut InternalRequest, releases: &mut Releases, now: Instant) -> Verdict {
+    async fn decide(&self, msg: &mut InternalRequest, releases: &mut Releases) -> Verdict {
         let Some(tenant) = msg.request.metadata.get(&self.attribute).cloned() else {
             return Verdict::Continue;
         };
-        let class = self.acquire(&tenant, releases, now);
+        let class = self.acquire(&tenant, releases).await;
         msg.routing.set_classification(Some(class));
         if self.gating == GatingMode::Blocking && class == Classification::Overflow {
             Verdict::Refuse
@@ -161,82 +110,82 @@ impl Gate for QuotaGate {
         msg: &'a mut InternalRequest,
         releases: &'a mut Releases,
     ) -> BoxFuture<'a, Verdict> {
-        Box::pin(async move { self.decide(msg, releases, Instant::now()) })
+        Box::pin(self.decide(msg, releases))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use crate::api::routing::Classification;
     use crate::gate::Verdict;
     use crate::gate::admission::GatingMode;
-    use crate::gate::admission::quota::{QuotaGate, QuotaMode, QuotaState};
+    use crate::gate::admission::counters::Counters;
+    use crate::gate::admission::counters::local::LocalCounters;
+    use crate::gate::admission::quota::{QuotaGate, QuotaMode};
     use crate::gate::release::Releases;
     use crate::gate::test_support::request;
 
-    fn gate(mode: QuotaMode, gating: GatingMode, state: Arc<QuotaState>) -> QuotaGate {
+    fn gate(mode: QuotaMode, gating: GatingMode, counters: Arc<dyn Counters>) -> QuotaGate {
         QuotaGate::new(
             "userid".into(),
+            "quota:".into(),
             mode,
             gating,
             2,
             Duration::from_secs(10),
-            state,
+            counters,
         )
     }
 
-    #[test]
-    fn requests_without_the_attribute_pass_untouched() {
-        let g = gate(QuotaMode::Concurrency, GatingMode::Blocking, Arc::default());
+    fn local() -> Arc<dyn Counters> {
+        Arc::new(LocalCounters::default())
+    }
+
+    #[tokio::test]
+    async fn requests_without_the_attribute_pass_untouched() {
+        let g = gate(QuotaMode::Concurrency, GatingMode::Blocking, local());
         let mut msg = request(&[("tenant", "a")]);
         assert_eq!(
-            g.decide(&mut msg, &mut Releases::default(), Instant::now()),
+            g.decide(&mut msg, &mut Releases::default()).await,
             Verdict::Continue
         );
         assert_eq!(msg.routing.classification(), None);
     }
 
-    #[test]
-    fn concurrency_blocking_refuses_over_limit_and_frees_on_release() {
-        let g = gate(QuotaMode::Concurrency, GatingMode::Blocking, Arc::default());
-        let now = Instant::now();
+    #[tokio::test]
+    async fn concurrency_blocking_refuses_over_limit_and_frees_on_release() {
+        let g = gate(QuotaMode::Concurrency, GatingMode::Blocking, local());
         let mut held = Releases::default();
         for _ in 0..2 {
             let mut msg = request(&[("userid", "a")]);
-            assert_eq!(g.decide(&mut msg, &mut held, now), Verdict::Continue);
+            assert_eq!(g.decide(&mut msg, &mut held).await, Verdict::Continue);
             assert_eq!(msg.routing.classification(), Some(Classification::Reserved));
         }
         let mut msg = request(&[("userid", "a")]);
         assert_eq!(
-            g.decide(&mut msg, &mut Releases::default(), now),
+            g.decide(&mut msg, &mut Releases::default()).await,
             Verdict::Refuse
         );
         assert_eq!(msg.routing.classification(), Some(Classification::Overflow));
-        // Another tenant has its own quota.
         let mut other = request(&[("userid", "b")]);
         assert_eq!(
-            g.decide(&mut other, &mut Releases::default(), now),
+            g.decide(&mut other, &mut Releases::default()).await,
             Verdict::Continue
         );
         drop(held);
         let mut msg = request(&[("userid", "a")]);
         assert_eq!(
-            g.decide(&mut msg, &mut Releases::default(), now),
+            g.decide(&mut msg, &mut Releases::default()).await,
             Verdict::Continue
         );
     }
 
-    #[test]
-    fn classifying_admits_overflow() {
-        let g = gate(
-            QuotaMode::Concurrency,
-            GatingMode::Classifying,
-            Arc::default(),
-        );
-        let now = Instant::now();
+    #[tokio::test]
+    async fn classifying_admits_overflow() {
+        let g = gate(QuotaMode::Concurrency, GatingMode::Classifying, local());
         let mut held = Releases::default();
         for want in [
             Classification::Reserved,
@@ -244,68 +193,65 @@ mod tests {
             Classification::Overflow,
         ] {
             let mut msg = request(&[("userid", "a")]);
-            assert_eq!(g.decide(&mut msg, &mut held, now), Verdict::Continue);
+            assert_eq!(g.decide(&mut msg, &mut held).await, Verdict::Continue);
             assert_eq!(msg.routing.classification(), Some(want));
         }
     }
 
-    #[test]
-    fn rate_limit_slides() {
-        let g = gate(QuotaMode::RateLimit, GatingMode::Blocking, Arc::default());
-        let t0 = Instant::now();
+    #[tokio::test]
+    async fn rate_limit_refuses_past_the_limit() {
+        let g = gate(QuotaMode::RateLimit, GatingMode::Blocking, local());
         let mut r = Releases::default();
-        let mut decide = |at: Instant| g.decide(&mut request(&[("userid", "a")]), &mut r, at);
-        assert_eq!(decide(t0), Verdict::Continue);
-        assert_eq!(decide(t0 + Duration::from_secs(5)), Verdict::Continue);
-        assert_eq!(decide(t0 + Duration::from_secs(9)), Verdict::Refuse);
-        assert_eq!(decide(t0 + Duration::from_secs(10)), Verdict::Continue);
-        assert_eq!(decide(t0 + Duration::from_secs(11)), Verdict::Refuse);
-        assert_eq!(decide(t0 + Duration::from_secs(15)), Verdict::Continue);
+        assert_eq!(
+            g.decide(&mut request(&[("userid", "a")]), &mut r).await,
+            Verdict::Continue
+        );
+        assert_eq!(
+            g.decide(&mut request(&[("userid", "a")]), &mut r).await,
+            Verdict::Continue
+        );
+        assert_eq!(
+            g.decide(&mut request(&[("userid", "a")]), &mut r).await,
+            Verdict::Refuse
+        );
+        assert!(r.is_empty());
     }
 
-    #[test]
-    fn gates_with_shared_state_share_the_quota() {
-        let state = Arc::new(QuotaState::default());
+    #[tokio::test]
+    async fn gates_with_one_prefix_share_the_quota() {
+        let counters = local();
         let a = gate(
             QuotaMode::Concurrency,
             GatingMode::Blocking,
-            Arc::clone(&state),
+            Arc::clone(&counters),
         );
-        let b = gate(QuotaMode::Concurrency, GatingMode::Blocking, state);
-        let now = Instant::now();
+        let b = gate(
+            QuotaMode::Concurrency,
+            GatingMode::Blocking,
+            Arc::clone(&counters),
+        );
         let mut held = Releases::default();
-        a.decide(&mut request(&[("userid", "t")]), &mut held, now);
-        b.decide(&mut request(&[("userid", "t")]), &mut held, now);
+        a.decide(&mut request(&[("userid", "t")]), &mut held).await;
+        b.decide(&mut request(&[("userid", "t")]), &mut held).await;
         assert_eq!(
-            a.decide(
-                &mut request(&[("userid", "t")]),
-                &mut Releases::default(),
-                now
-            ),
+            a.decide(&mut request(&[("userid", "t")]), &mut Releases::default())
+                .await,
             Verdict::Refuse
         );
-    }
-
-    #[test]
-    fn idle_rate_windows_are_swept() {
-        let state = Arc::new(QuotaState::default());
-        let g = gate(
-            QuotaMode::RateLimit,
+        let other_prefix = QuotaGate::new(
+            "userid".into(),
+            "other:".into(),
+            QuotaMode::Concurrency,
             GatingMode::Blocking,
-            Arc::clone(&state),
+            2,
+            Duration::from_secs(10),
+            counters,
         );
-        let t0 = Instant::now();
-        g.decide(
-            &mut request(&[("userid", "gone")]),
-            &mut Releases::default(),
-            t0,
+        assert_eq!(
+            other_prefix
+                .decide(&mut request(&[("userid", "t")]), &mut Releases::default())
+                .await,
+            Verdict::Continue
         );
-        g.decide(
-            &mut request(&[("userid", "x")]),
-            &mut Releases::default(),
-            t0 + Duration::from_secs(20),
-        );
-        let windows = state.admissions.lock().unwrap();
-        assert!(!windows.by_tenant.contains_key("gone"));
     }
 }

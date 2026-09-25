@@ -5,9 +5,10 @@ pub mod source;
 use std::sync::Arc;
 
 use crate::api::request::InternalRequest;
+use crate::boxed::BoxFuture;
 use crate::gate::metric::source::MetricSource;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, Verdict, budget_verdict};
+use crate::gate::{Gate, Verdict, budget_verdict};
 use crate::telemetry::metrics::{Metrics, QueueLabels};
 
 /// Reads a budget D from its source and returns D − threshold clamped to
@@ -118,9 +119,10 @@ impl Gate for MetricGate {
 mod tests {
     use std::sync::Arc;
 
+    use crate::boxed::BoxFuture;
+    use crate::gate::Gate;
     use crate::gate::metric::MetricGate;
     use crate::gate::metric::source::{MetricSource, Sample, SourceError};
-    use crate::gate::{BoxFuture, Gate};
     use crate::telemetry::metrics::{Metrics, QueueLabels};
 
     struct Fixed(Result<Vec<f64>, SourceError>);

@@ -2,18 +2,53 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use crate::config::ConfigError;
 use crate::config::duration::parse_duration;
+use crate::store::config::{Backend, BlobLocation, StoreConfig};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum StoreKind {
+    /// redb under --data-dir, owned by this process alone.
+    Embedded,
+    /// Postgres at --database-url, shared by every replica.
+    Postgres,
+}
 
 /// Asynchronous dispatch processor for llm-d.
 #[derive(Debug, Clone, Parser)]
 #[command(version, about)]
 pub struct Cli {
+    /// Where queues, results, and control values live.
+    #[arg(long, value_enum, default_value_t = StoreKind::Embedded)]
+    pub store: StoreKind,
     /// Directory holding the embedded store.
     #[arg(long, default_value = "data")]
     pub data_dir: PathBuf,
+    /// Postgres connection URL (`postgres://...` or `key=value` form). TLS
+    /// follows its `sslmode`.
+    #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
+    pub database_url: Option<String>,
+    /// Connections each replica keeps to Postgres.
+    #[arg(long, default_value_t = 32)]
+    pub database_max_connections: usize,
+    /// Extra CA certificate (PEM) for verifying Postgres.
+    #[arg(long)]
+    pub database_ca_cert: Option<PathBuf>,
+    /// How long a replica's queue partitions and quota slots outlive its last
+    /// heartbeat.
+    #[arg(long, default_value = "30s", value_parser = parse_duration)]
+    pub partition_lease_ttl: Duration,
+    /// How long a partition handed to another replica waits for its
+    /// in-flight requests before it is released anyway.
+    #[arg(long, default_value = "15m", value_parser = parse_duration)]
+    pub partition_handoff_timeout: Duration,
+    /// Where large request and result bodies go: `local` (embedded only),
+    /// `postgres` (Postgres only), or an object store URL (`s3://bucket/prefix`,
+    /// `gs://`, `az://`, `file://`). Defaults to the store's own.
+    #[arg(long)]
+    pub blob_store: Option<BlobLocation>,
 
     /// Request payloads up to this many bytes are stored in the database;
     /// larger ones are streamed to blob files.
@@ -112,7 +147,48 @@ impl Cli {
         }
     }
 
+    pub fn store_config(&self) -> Result<StoreConfig, ConfigError> {
+        let backend = match self.store {
+            StoreKind::Embedded => Backend::Embedded {
+                dir: self.data_dir.clone(),
+            },
+            StoreKind::Postgres => Backend::Postgres {
+                url: self
+                    .database_url
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| {
+                        ConfigError::Cli("--store postgres requires --database-url".into())
+                    })?,
+                max_connections: self.database_max_connections,
+                ca_cert: self.database_ca_cert.clone(),
+                lease_ttl: self.partition_lease_ttl,
+                handoff_timeout: self.partition_handoff_timeout,
+            },
+        };
+        let config = StoreConfig {
+            backend,
+            blobs: self.blob_store.clone(),
+            result_blob_retention: self.result_blob_retention,
+        };
+        config
+            .validate()
+            .map_err(|e| ConfigError::Cli(e.to_string()))?;
+        Ok(config)
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.database_max_connections == 0 {
+            return Err(ConfigError::Cli(
+                "--database-max-connections must be positive".into(),
+            ));
+        }
+        if self.partition_lease_ttl.is_zero() {
+            return Err(ConfigError::Cli(
+                "--partition-lease-ttl must be positive".into(),
+            ));
+        }
+        self.store_config()?;
         if self.concurrency == 0 {
             return Err(ConfigError::Cli("--concurrency must be positive".into()));
         }
@@ -131,7 +207,7 @@ mod tests {
 
     use clap::Parser;
 
-    use crate::config::cli::Cli;
+    use crate::config::cli::{Cli, StoreKind};
 
     #[test]
     fn defaults_match_the_go_processor() {
@@ -145,7 +221,34 @@ mod tests {
         assert_eq!(cli.verbosity, 2);
         assert_eq!(cli.inline_payload_limit, 65536);
         assert_eq!(cli.result_blob_retention, Duration::from_secs(86_400));
+        assert_eq!(cli.store, StoreKind::Embedded);
+        assert_eq!(cli.partition_lease_ttl, Duration::from_secs(30));
+        assert_eq!(cli.blob_store, None);
         cli.validate().unwrap();
+    }
+
+    #[test]
+    fn postgres_needs_a_database_and_a_shared_blob_store() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["x", "--transport-config", "{}"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all).unwrap()
+        };
+        let no_url = Cli {
+            database_url: None,
+            ..parse(&["--store", "postgres"])
+        };
+        assert!(no_url.validate().is_err());
+        let url = ["--store", "postgres", "--database-url", "postgres://db/x"];
+        parse(&url).validate().unwrap();
+        let mut local = url.to_vec();
+        local.extend(["--blob-store", "local"]);
+        assert!(parse(&local).validate().is_err());
+        let mut s3 = url.to_vec();
+        s3.extend(["--blob-store", "s3://bucket/p"]);
+        parse(&s3).validate().unwrap();
+        assert!(Cli::try_parse_from(["x", "--blob-store", "bucket"]).is_err());
+        assert!(Cli::try_parse_from(["x", "--store", "redis"]).is_err());
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use crate::api::request::InternalRequest;
 use crate::api::result::ResultMessage;
 use crate::api::routing::{Classification, Tier};
+use crate::boxed::BoxFuture;
 use crate::gate::release::Releases;
-use crate::gate::{BoxFuture, Gate, SharedGate, Verdict};
+use crate::gate::{Gate, SharedGate, Verdict};
 
 /// Admits everything while the saturation gate admits. Once it refuses:
 /// reserved traffic waits, interactive overflow is dropped with a 429-style
