@@ -324,7 +324,8 @@ pub async fn finish_writes_result_and_clears_request_state(store: Store) {
                 claim: claim.clone(),
                 envelope: env.clone(),
                 result: result.clone(),
-            }],
+            }]
+            .into(),
             NOW_MS,
         )
         .await
@@ -341,7 +342,7 @@ pub async fn finish_writes_result_and_clears_request_state(store: Store) {
     );
     assert!(payload_bytes(&store, &env).await.is_none());
     let applied = store
-        .apply_outcomes(vec![Outcome::Release { claim }], NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
         .await
         .unwrap();
     assert_eq!(applied.fenced, 1);
@@ -366,7 +367,8 @@ pub async fn blob_payload_lives_until_the_result_is_written(store: Store) {
                 claim,
                 result: ResultMessage::http(&env, 200, b"{}"),
                 envelope: env.clone(),
-            }],
+            }]
+            .into(),
             NOW_MS,
         )
         .await
@@ -387,7 +389,8 @@ pub async fn blob_payload_survives_retry_and_release(store: Store) {
                 claim,
                 envelope: head.envelope.unwrap(),
                 due_ms: NOW_MS,
-            }],
+            }]
+            .into(),
             NOW_MS,
         )
         .await
@@ -395,7 +398,7 @@ pub async fn blob_payload_survives_retry_and_release(store: Store) {
     store.promote_due_retries(NOW_MS, 10).await.unwrap();
     let (head, claim) = claim_head(&store, "q").await;
     store
-        .apply_outcomes(vec![Outcome::Release { claim }], NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
         .await
         .unwrap();
     let env = head.envelope.unwrap();
@@ -422,7 +425,8 @@ pub async fn fenced_result_blob_is_deleted(store: Store) {
                 claim: stale,
                 envelope: env,
                 result,
-            }],
+            }]
+            .into(),
             NOW_MS,
         )
         .await
@@ -446,11 +450,14 @@ pub async fn replayed_finish_keeps_its_result_blob(store: Store) {
         envelope: env,
     };
     let first = store
-        .apply_outcomes(vec![finish.clone()], NOW_MS)
+        .apply_outcomes(vec![finish.clone()].into(), NOW_MS)
         .await
         .unwrap();
     assert_eq!(first.results_written, 1);
-    let replay = store.apply_outcomes(vec![finish], NOW_MS).await.unwrap();
+    let replay = store
+        .apply_outcomes(vec![finish].into(), NOW_MS)
+        .await
+        .unwrap();
     assert_eq!(replay.fenced, 1);
     assert!(blob_exists(&store, &key).await);
     assert!(store.open_result_blob(key, NOW_MS).await.unwrap().is_some());
@@ -467,7 +474,7 @@ pub async fn stale_claim_id_is_fenced(store: Store) {
         ..claim
     };
     let applied = store
-        .apply_outcomes(vec![Outcome::Release { claim: stale }], NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim: stale }].into(), NOW_MS)
         .await
         .unwrap();
     assert_eq!(applied.fenced, 1);
@@ -481,7 +488,7 @@ pub async fn release_restores_the_original_position(store: Store) {
         .unwrap();
     let (head, claim) = claim_head(&store, "q").await;
     store
-        .apply_outcomes(vec![Outcome::Release { claim }], NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
         .await
         .unwrap();
     let again = store.peek("q".into(), 1, NOW_MS).await.unwrap().remove(0);
@@ -504,7 +511,8 @@ pub async fn retry_waits_until_due(store: Store) {
                 claim,
                 envelope: env,
                 due_ms: NOW_MS + 500,
-            }],
+            }]
+            .into(),
             NOW_MS,
         )
         .await
@@ -559,7 +567,8 @@ pub async fn cancel_marks_only_the_live_generation(store: Store) {
                 claim,
                 envelope: envelope("a", "61", "q", 2_000),
                 result: ResultMessage::cancelled(&envelope("a", "61", "q", 2_000)),
-            }],
+            }]
+            .into(),
             NOW_MS,
         )
         .await
@@ -632,7 +641,8 @@ where
                     claim,
                     envelope: env,
                     result,
-                }],
+                }]
+                .into(),
                 NOW_MS,
             )
             .await

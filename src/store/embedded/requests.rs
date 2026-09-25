@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
@@ -369,7 +370,7 @@ impl EmbeddedStore {
 
     pub(crate) async fn end_claims(
         &self,
-        outcomes: Vec<Outcome>,
+        outcomes: Arc<[Outcome]>,
         now_ms: i64,
     ) -> Result<Applied, StoreError> {
         let (applied, dropped) = self.run(move |db| {
@@ -378,7 +379,7 @@ impl EmbeddedStore {
             let dropped;
             {
                 let mut t = Tables::open(&txn)?;
-                for outcome in &outcomes {
+                for outcome in outcomes.iter() {
                     let claim = outcome.claim();
                     let current = t
                         .claimed

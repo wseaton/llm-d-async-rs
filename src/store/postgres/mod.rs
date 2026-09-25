@@ -7,6 +7,13 @@
 //! nothing. Admission counters live here too (see [`counters`]), so quota
 //! limits hold across replicas.
 
+/// The database's clock in Unix milliseconds, as SQL, for `concat!`.
+macro_rules! db_now_ms {
+    () => {
+        "(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
+    };
+}
+
 pub(crate) mod cached;
 mod cancel_checks;
 pub mod connect;
@@ -45,7 +52,7 @@ use crate::store::queue::{
 use crate::store::{QueueStore, Stamped};
 
 /// The database clock, which every replica times leases by.
-pub(crate) const DB_NOW_MS: &str = "(extract(epoch FROM clock_timestamp()) * 1000)::bigint";
+pub(crate) const DB_NOW_MS: &str = db_now_ms!();
 
 /// Notified in every transaction that writes a result.
 pub(crate) const RESULTS_CHANNEL: &str = "lda_results";
@@ -213,7 +220,7 @@ impl QueueStore for PgStore {
 
     fn apply_outcomes(
         &self,
-        outcomes: Vec<Outcome>,
+        outcomes: Arc<[Outcome]>,
         now_ms: i64,
     ) -> BoxFuture<'_, Result<Applied, StoreError>> {
         Box::pin(self.inner.apply_outcomes(outcomes, now_ms))
@@ -499,7 +506,8 @@ mod tests {
                     claim: claim.clone(),
                     result: ResultMessage::http(&env, 200, b"late"),
                     envelope: env,
-                }],
+                }]
+                .into(),
                 NOW_MS,
             )
             .await
@@ -520,7 +528,8 @@ mod tests {
                     claim: claim.clone(),
                     result: ResultMessage::http(&env, 200, b"ok"),
                     envelope: env,
-                }],
+                }]
+                .into(),
                 NOW_MS,
             )
             .await
@@ -560,7 +569,7 @@ mod tests {
         let held_by_a = owners(&a).await.get(a.pg.owner()).copied();
         assert_eq!(held_by_a, Some(1), "the partition with a claim drains");
         a.store
-            .apply_outcomes(vec![Outcome::Release { claim }], NOW_MS)
+            .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
             .await
             .unwrap();
         a.pg.inner.rebalance(QUEUE).await.unwrap();
@@ -641,7 +650,8 @@ mod tests {
                     claim,
                     result: ResultMessage::cancelled(&env),
                     envelope: env,
-                }],
+                }]
+                .into(),
                 NOW_MS,
             )
             .await
@@ -735,7 +745,8 @@ mod tests {
                     claim,
                     result: ResultMessage::http(&env, 200, b"{}"),
                     envelope: env,
-                }],
+                }]
+                .into(),
                 NOW_MS,
             ),
         )
@@ -759,7 +770,8 @@ mod tests {
             .apply_outcomes(
                 vec![Outcome::Release {
                     claim: stale.clone(),
-                }],
+                }]
+                .into(),
                 NOW_MS,
             )
             .await
@@ -773,7 +785,7 @@ mod tests {
         };
         let applied = f
             .store
-            .apply_outcomes(vec![finish(stale), finish(current)], NOW_MS)
+            .apply_outcomes(vec![finish(stale), finish(current)].into(), NOW_MS)
             .await
             .unwrap();
         assert_eq!((applied.results_written, applied.fenced), (1, 1));

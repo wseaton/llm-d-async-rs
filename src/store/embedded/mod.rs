@@ -218,7 +218,7 @@ impl QueueStore for EmbeddedStore {
 
     fn apply_outcomes(
         &self,
-        outcomes: Vec<Outcome>,
+        outcomes: Arc<[Outcome]>,
         now_ms: i64,
     ) -> BoxFuture<'_, Result<Applied, StoreError>> {
         Box::pin(self.end_claims(outcomes, now_ms))
@@ -490,7 +490,8 @@ mod tests {
                         envelope,
                         due_ms: NOW_MS,
                     },
-                ],
+                ]
+                .into(),
                 NOW_MS,
             )
             .await

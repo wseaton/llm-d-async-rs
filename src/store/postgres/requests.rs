@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use deadpool_postgres::Transaction;
@@ -10,7 +11,7 @@ use crate::store::blob::key::BlobKey;
 use crate::store::error::StoreError;
 use crate::store::postgres::cached::Cached;
 use crate::store::postgres::partitions::{Tracked, partition_of};
-use crate::store::postgres::{DB_NOW_MS, Inner, RESULTS_CHANNEL};
+use crate::store::postgres::{Inner, RESULTS_CHANNEL};
 use crate::store::queue::{
     Admission, Admitted, Applied, Backlog, ClaimRef, NewRequest, Outcome, PayloadBody, Peeked,
     PendingKey,
@@ -21,39 +22,72 @@ use crate::store::staging::StagedPayload;
 const INSERT_CHUNK: usize = 1000;
 
 /// Deletes the claims `(id, request_token, attempt)` of `$2..$4` that `$1`
-/// still holds under the epoch they were dispatched in.
+/// still holds under the epoch they were dispatched in. Each key is one
+/// probe of the unique index, and the delete goes straight to the rows found.
 pub(crate) const FINISH: &str = "
     DELETE FROM lda_requests r
-    USING unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt),
-          lda_partitions p
-    WHERE r.id = ANY($2::text[]) AND r.id = k.id AND r.request_token = k.request_token
-      AND r.dispatch_epoch <> 0 AND r.dispatch_attempt = k.attempt
-      AND p.queue = r.queue AND p.partition_id = r.partition_id
-      AND p.owner = $1 AND p.epoch = r.dispatch_epoch
+    WHERE r.ctid = ANY(ARRAY(
+        SELECT x.tid
+        FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt)
+        CROSS JOIN LATERAL (
+            SELECT h.ctid AS tid FROM lda_requests h
+            JOIN lda_partitions p ON p.queue = h.queue AND p.partition_id = h.partition_id
+            WHERE h.id = k.id AND h.request_token = k.request_token
+              AND h.dispatch_epoch <> 0 AND h.dispatch_attempt = k.attempt
+              AND p.owner = $1 AND p.epoch = h.dispatch_epoch
+        ) x))
     RETURNING r.id, r.request_token, r.dispatch_attempt, r.payload IS NULL";
 
 /// Returns the claims of `$2..$4` that `$1` holds to their queue, due at `$5`
 /// with envelopes `$6`.
 pub(crate) const RETRY: &str = "
+    WITH m AS MATERIALIZED (
+        SELECT x.tid, k.due, k.envelope
+        FROM unnest($2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::text[])
+             AS k(id, request_token, attempt, due, envelope)
+        CROSS JOIN LATERAL (
+            SELECT h.ctid AS tid FROM lda_requests h
+            JOIN lda_partitions p ON p.queue = h.queue AND p.partition_id = h.partition_id
+            WHERE h.id = k.id AND h.request_token = k.request_token
+              AND h.dispatch_epoch <> 0 AND h.dispatch_attempt = k.attempt
+              AND p.owner = $1
+        ) x
+    )
     UPDATE lda_requests r
-    SET dispatch_epoch = 0, not_before_ms = k.due, envelope = k.envelope
-    FROM unnest($2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::text[])
-         AS k(id, request_token, attempt, due, envelope),
-         lda_partitions p
-    WHERE r.id = ANY($2::text[]) AND r.id = k.id AND r.request_token = k.request_token
-      AND r.dispatch_epoch <> 0 AND r.dispatch_attempt = k.attempt
-      AND p.queue = r.queue AND p.partition_id = r.partition_id
-      AND p.owner = $1";
+    SET dispatch_epoch = 0, not_before_ms = m.due, envelope = m.envelope
+    FROM m
+    WHERE r.ctid = ANY(ARRAY(SELECT tid FROM m)) AND r.ctid = m.tid";
 
 /// Returns the claims of `$2..$4` that `$1` holds to their queue unchanged.
 pub(crate) const RELEASE: &str = "
     UPDATE lda_requests r SET dispatch_epoch = 0
-    FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt),
-         lda_partitions p
-    WHERE r.id = ANY($2::text[]) AND r.id = k.id AND r.request_token = k.request_token
-      AND r.dispatch_epoch <> 0 AND r.dispatch_attempt = k.attempt
-      AND p.queue = r.queue AND p.partition_id = r.partition_id
-      AND p.owner = $1";
+    WHERE r.ctid = ANY(ARRAY(
+        SELECT x.tid
+        FROM unnest($2::text[], $3::text[], $4::bigint[]) AS k(id, request_token, attempt)
+        CROSS JOIN LATERAL (
+            SELECT h.ctid AS tid FROM lda_requests h
+            JOIN lda_partitions p ON p.queue = h.queue AND p.partition_id = h.partition_id
+            WHERE h.id = k.id AND h.request_token = k.request_token
+              AND h.dispatch_epoch <> 0 AND h.dispatch_attempt = k.attempt
+              AND p.owner = $1
+        ) x))";
+
+/// Claims the pending requests `$1` of queue `$2` in partitions `$3` holds
+/// and is not draining.
+pub(crate) const CLAIM: &str = concat!(
+    "UPDATE lda_requests r
+     SET dispatch_epoch = p.epoch,
+         dispatch_attempt = nextval('lda_dispatch_attempts')
+     FROM lda_partitions p
+     WHERE r.seq = ANY($1) AND r.queue = $2 AND r.dispatch_epoch = 0
+       AND p.queue = r.queue AND p.partition_id = r.partition_id
+       AND p.owner = $3 AND NOT p.draining
+       AND p.lease_expires_ms > ",
+    db_now_ms!(),
+    "
+     RETURNING r.seq, r.id, r.request_token, r.partition_id,
+               r.dispatch_epoch, r.dispatch_attempt, r.payload"
+);
 
 fn seq_of(key: PendingKey) -> i64 {
     i64::try_from(key.seq).unwrap_or(i64::MAX)
@@ -335,21 +369,7 @@ impl Inner {
         let mut tracked = Vec::new();
         if !claims.is_empty() {
             let rows = txn
-                .query_cached(
-                    &format!(
-                        "UPDATE lda_requests r
-                         SET dispatch_epoch = p.epoch,
-                             dispatch_attempt = nextval('lda_dispatch_attempts')
-                         FROM lda_partitions p
-                         WHERE r.seq = ANY($1) AND r.queue = $2 AND r.dispatch_epoch = 0
-                           AND p.queue = r.queue AND p.partition_id = r.partition_id
-                           AND p.owner = $3 AND NOT p.draining
-                           AND p.lease_expires_ms > {DB_NOW_MS}
-                         RETURNING r.seq, r.id, r.request_token, r.partition_id,
-                                   r.dispatch_epoch, r.dispatch_attempt, r.payload"
-                    ),
-                    &[&claims, &queue, &self.owner],
-                )
+                .query_cached(CLAIM, &[&claims, &queue, &self.owner])
                 .await?;
             for row in rows {
                 let seq: i64 = row.get(0);
@@ -422,7 +442,7 @@ impl Inner {
 
     pub(crate) async fn apply_outcomes(
         &self,
-        outcomes: Vec<Outcome>,
+        outcomes: Arc<[Outcome]>,
         now_ms: i64,
     ) -> Result<Applied, StoreError> {
         let mut finishes = Vec::new();
@@ -430,7 +450,7 @@ impl Inner {
         let mut releases = Vec::new();
         let mut fenced_blobs = Vec::new();
         let mut applied = Applied::default();
-        for outcome in &outcomes {
+        for outcome in outcomes.iter() {
             let claim = outcome.claim();
             let Some((id, token)) = split_generation(&claim.generation) else {
                 applied.fenced += 1;
@@ -535,7 +555,7 @@ impl Inner {
         drop(client);
 
         if let Ok(mut state) = self.state.lock() {
-            for outcome in &outcomes {
+            for outcome in outcomes.iter() {
                 let claim = outcome.claim();
                 let attempt = i64::try_from(claim.claim_id).unwrap_or(i64::MAX);
                 if state
@@ -666,11 +686,17 @@ mod tests {
     use tokio_postgres::types::{FromSql, ToSql, Type};
 
     use crate::store::postgres::connect::Database;
-    use crate::store::postgres::requests::{FINISH, RELEASE, RETRY};
+    use crate::store::postgres::requests::{CLAIM, FINISH, RELEASE, RETRY};
     use crate::store::postgres::schema::migrate;
     use crate::store::postgres::test_support::schema_url;
 
-    const ROWS: i64 = 50_000;
+    const ROWS: i64 = 100_000;
+    /// The writer's largest batch.
+    const KEYS: i64 = 1024;
+    const PARTITIONS: i64 = 64;
+    /// Most rows a batch may read and discard: each key may check every
+    /// partition, but nothing may scale with the queue.
+    const DISCARD_LIMIT: f64 = (KEYS * PARTITIONS) as f64;
 
     /// A `json` column, as text.
     struct Json(String);
@@ -688,9 +714,45 @@ mod tests {
         }
     }
 
-    /// Shared buffers `statement` reads to find its rows (for an insert,
-    /// update or delete, below the write), run once and rolled back.
-    async fn blocks(client: &mut Object, statement: &str, params: &[&(dyn ToSql + Sync)]) -> i64 {
+    /// What finding a statement's rows cost: shared buffers read (below the
+    /// write, for an insert, update or delete) and rows read then discarded
+    /// by a filter, join filter or index recheck.
+    #[derive(Debug, Default)]
+    struct Profile {
+        blocks: i64,
+        discarded: f64,
+    }
+
+    fn walk(node: &serde_json::Value, profile: &mut Profile, top: bool) {
+        let loops = node["Actual Loops"].as_f64().unwrap_or(1.0);
+        for key in [
+            "Rows Removed by Filter",
+            "Rows Removed by Join Filter",
+            "Rows Removed by Index Recheck",
+        ] {
+            profile.discarded += node[key].as_f64().unwrap_or(0.0) * loops;
+        }
+        let children = node["Plans"].as_array().cloned().unwrap_or_default();
+        if top && node["Node Type"] == "ModifyTable" {
+            for child in &children {
+                profile.blocks += child["Shared Hit Blocks"].as_i64().unwrap_or(0)
+                    + child["Shared Read Blocks"].as_i64().unwrap_or(0);
+            }
+        } else if top {
+            profile.blocks = node["Shared Hit Blocks"].as_i64().unwrap_or(0)
+                + node["Shared Read Blocks"].as_i64().unwrap_or(0);
+        }
+        for child in &children {
+            walk(child, profile, false);
+        }
+    }
+
+    /// Runs `statement` once under a generic plan and rolls it back.
+    async fn profile(
+        client: &mut Object,
+        statement: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Profile {
         let txn = client.transaction().await.unwrap();
         txn.batch_execute("SET LOCAL plan_cache_mode = force_generic_plan")
             .await
@@ -704,16 +766,16 @@ mod tests {
             .unwrap();
         txn.rollback().await.unwrap();
         let plan: serde_json::Value = serde_json::from_str(&row.get::<_, Json>(0).0).unwrap();
-        let mut node = &plan[0]["Plan"];
-        if node["Node Type"] == "ModifyTable" {
-            node = &node["Plans"][0];
-        }
-        node["Shared Hit Blocks"].as_i64().unwrap() + node["Shared Read Blocks"].as_i64().unwrap()
+        let mut profile = Profile::default();
+        walk(&plan[0]["Plan"], &mut profile, true);
+        profile
     }
 
     /// Queue tables go from empty to full faster than autovacuum analyzes
-    /// them. Each hot statement must touch rows in proportion to its batch
-    /// whatever the statistics say, not scan the queue.
+    /// them. Each hot statement must read rows in proportion to its batch
+    /// whatever the statistics say: no scan of the queue, no join that
+    /// compares every key with every row. The queue is larger than
+    /// [`DISCARD_LIMIT`], so either shows up as discarded rows.
     #[tokio::test]
     async fn hot_statements_stay_proportional_to_their_batch_under_stale_statistics() {
         let Some(url) = schema_url().await else {
@@ -724,25 +786,45 @@ mod tests {
         let mut client = db.pool.get().await.unwrap();
         client
             .batch_execute(&format!(
-                "INSERT INTO lda_partitions (queue, partition_id, owner, epoch)
-                     SELECT 'q', g, 'me', 1 FROM generate_series(0, 63) g;
+                "INSERT INTO lda_partitions (queue, partition_id, owner, epoch, lease_expires_ms)
+                     SELECT 'q', g, 'me', 1, 9223372036854775807 FROM generate_series(0, {PARTITIONS} - 1) g;
                  INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope)
                      SELECT 'early' || g, 'early' || g, 'q', g, g, '{{}}' FROM generate_series(1, 7) g;
                  ANALYZE lda_requests;
                  INSERT INTO lda_requests (id, request_token, queue, partition_id, deadline, envelope, payload)
-                     SELECT 'r' || g, 't' || g, 'q', g % 64, g, '{{}}', convert_to(repeat('x', 512), 'UTF8')
+                     SELECT 'r' || g, 't' || g, 'q', g % {PARTITIONS}, g, '{{}}', convert_to(repeat('x', 512), 'UTF8')
                      FROM generate_series(1, {ROWS}) g;"
             ))
             .await
             .unwrap();
 
-        let peek = blocks(
+        let peek = profile(
             &mut client,
             "SELECT * FROM lda_peek('q', 'me', 9223372036854775807, 10)",
             &[],
         )
         .await;
-        assert!(peek < 2000, "peek of 10 touched {peek} blocks");
+        assert!(peek.blocks < 2000, "peek of 10: {peek:?}");
+        assert!(peek.discarded < 100.0, "peek of 10: {peek:?}");
+
+        let seqs: Vec<i64> = client
+            .query(
+                "SELECT seq FROM lda_requests WHERE id LIKE 'r%' ORDER BY seq LIMIT $1",
+                &[&KEYS],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let queue = "q";
+        let owner = "me";
+        let claim = profile(&mut client, CLAIM, &[&seqs, &queue, &owner]).await;
+        assert!(
+            claim.discarded < DISCARD_LIMIT,
+            "claim of {KEYS}: {claim:?}"
+        );
+        assert!(claim.blocks < 20 * KEYS, "claim of {KEYS}: {claim:?}");
 
         client
             .batch_execute(
@@ -751,11 +833,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let ids: Vec<String> = (100..132).map(|g| format!("r{g}")).collect();
-        let tokens: Vec<String> = (100..132).map(|g| format!("t{g}")).collect();
+        let keys = 1000..1000 + KEYS;
+        let ids: Vec<String> = keys.clone().map(|g| format!("r{g}")).collect();
+        let tokens: Vec<String> = keys.map(|g| format!("t{g}")).collect();
         let attempts: Vec<i64> = client
             .query(
-                "SELECT dispatch_attempt FROM lda_requests WHERE id = ANY($1) ORDER BY seq",
+                "SELECT dispatch_attempt FROM lda_requests r
+                 JOIN unnest($1::text[]) WITH ORDINALITY AS k(id, n) ON k.id = r.id
+                 ORDER BY k.n",
                 &[&ids],
             )
             .await
@@ -763,9 +848,9 @@ mod tests {
             .iter()
             .map(|r| r.get(0))
             .collect();
+        assert_eq!(attempts.len(), ids.len());
         let due: Vec<i64> = vec![0; ids.len()];
         let envelopes: Vec<String> = vec!["{}".into(); ids.len()];
-        let owner = "me";
         for (name, statement, params) in [
             (
                 "finish",
@@ -779,10 +864,14 @@ mod tests {
             ),
             ("release", RELEASE, vec![&owner, &ids, &tokens, &attempts]),
         ] {
-            let touched = blocks(&mut client, statement, &params).await;
+            let p = profile(&mut client, statement, &params).await;
             assert!(
-                touched < 300,
-                "{name} of 32 among {ROWS} in flight touched {touched} blocks"
+                p.discarded < DISCARD_LIMIT,
+                "{name} of {KEYS} among {ROWS} in flight: {p:?}"
+            );
+            assert!(
+                p.blocks < 20 * KEYS,
+                "{name} of {KEYS} among {ROWS} in flight: {p:?}"
             );
         }
     }

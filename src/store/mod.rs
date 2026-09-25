@@ -82,7 +82,7 @@ pub trait QueueStore: Send + Sync {
     /// body they reference is deleted.
     fn apply_outcomes(
         &self,
-        outcomes: Vec<Outcome>,
+        outcomes: Arc<[Outcome]>,
         now_ms: i64,
     ) -> BoxFuture<'_, Result<Applied, StoreError>>;
 

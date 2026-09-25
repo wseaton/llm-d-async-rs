@@ -8,7 +8,7 @@ use crate::clock::now_millis;
 use crate::store::Store;
 use crate::store::queue::Outcome;
 
-const MAX_BATCH: usize = 32;
+const MAX_BATCH: usize = 1024;
 const FIRST_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 
@@ -24,9 +24,10 @@ pub async fn run(store: Store, mut outcomes: UnboundedReceiver<Outcome>, results
                 Err(_) => break,
             }
         }
+        let batch: Arc<[Outcome]> = batch.into();
         let mut backoff = FIRST_BACKOFF;
         loop {
-            match store.apply_outcomes(batch.clone(), now_millis()).await {
+            match store.apply_outcomes(Arc::clone(&batch), now_millis()).await {
                 Ok(applied) => {
                     if applied.results_written > 0 {
                         results.notify_waiters();
