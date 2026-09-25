@@ -1,0 +1,322 @@
+use std::collections::BTreeMap;
+
+use axum::Json;
+use axum::extract::{FromRequest, Multipart, Request, State};
+use axum::http::{StatusCode, header};
+use serde::{Deserialize, Serialize};
+
+use crate::api::payload::JSON_CONTENT_TYPE;
+use crate::api::request::{InternalRequest, SubmitRequest};
+use crate::api::routing::InternalRouting;
+use crate::clock::{now_millis, now_secs};
+use crate::dispatch::queues::labels_of;
+use crate::server::AppState;
+use crate::server::error::ApiError;
+use crate::store::blob::{BlobKey, BlobStore};
+use crate::store::requests::NewRequest;
+use crate::store::staging::{PayloadSink, StagedPayload};
+
+/// Largest `request` part of a multipart submission.
+const MAX_ENVELOPE_BYTES: usize = 1 << 20;
+const MAX_BATCH: usize = 1000;
+const DEFAULT_PAYLOAD_CONTENT_TYPE: &str = "application/octet-stream";
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Submitted {
+    pub id: String,
+    pub request_token: String,
+}
+
+fn new_token() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
+fn bad(e: impl std::fmt::Display) -> ApiError {
+    ApiError::BadRequest(e.to_string())
+}
+
+/// Blob files staged for submissions that have not committed yet. Dropped
+/// before [`StagedBlobs::committed`], it deletes them, so a failed or
+/// abandoned submission (a client that disconnects mid-request) leaves
+/// nothing behind.
+struct StagedBlobs {
+    blobs: BlobStore,
+    keys: Vec<BlobKey>,
+}
+
+impl StagedBlobs {
+    fn new(state: &AppState) -> Self {
+        Self {
+            blobs: state.store.blobs().clone(),
+            keys: Vec::new(),
+        }
+    }
+
+    /// Tracks the blob a submission with `token` may stage. Tracking comes
+    /// before staging, so even a half-written blob is covered; deleting a
+    /// blob that was never written is a no-op.
+    fn track(&mut self, token: &str) {
+        if let Some(key) = BlobKey::request(token) {
+            self.keys.push(key);
+        }
+    }
+
+    fn committed(mut self) {
+        self.keys.clear();
+    }
+}
+
+impl Drop for StagedBlobs {
+    fn drop(&mut self) {
+        self.blobs.remove_dropped(&self.keys);
+    }
+}
+
+fn sink(state: &AppState) -> PayloadSink {
+    PayloadSink::new(
+        state.store.blobs().clone(),
+        state.limits.inline,
+        state.limits.max,
+    )
+}
+
+/// Validates a submission and resolves its routing.
+async fn envelope(
+    state: &AppState,
+    sub: &SubmitRequest,
+    token: &str,
+) -> Result<InternalRequest, ApiError> {
+    if sub.id.is_empty() {
+        return Err(bad("request ID is required"));
+    }
+    if sub.id.contains('\0') {
+        return Err(bad("request ID must not contain NUL"));
+    }
+    if sub.deadline <= 0 {
+        return Err(bad(
+            "deadline is required and must be a positive Unix timestamp",
+        ));
+    }
+    if sub.message().expired_at(now_millis()) {
+        return Err(bad("deadline has already expired"));
+    }
+    let queues = state.queues.snapshot().await;
+    let queue = if sub.request_queue_name.is_empty() {
+        queues
+            .first()
+            .map(|q| q.queue_name.clone())
+            .ok_or_else(|| bad("no queues are configured"))?
+    } else if queues
+        .iter()
+        .any(|q| q.queue_name == sub.request_queue_name)
+    {
+        sub.request_queue_name.clone()
+    } else {
+        return Err(bad(format!(
+            "unknown request_queue_name {:?}",
+            sub.request_queue_name
+        )));
+    };
+    let result_queue_name = if sub.result_queue_name.is_empty() {
+        state.default_result_queue.clone()
+    } else {
+        sub.result_queue_name.clone()
+    };
+    Ok(InternalRequest {
+        routing: InternalRouting {
+            request_token: token.to_owned(),
+            request_queue_name: queue,
+            result_queue_name,
+            ..Default::default()
+        },
+        request: sub.message(),
+        payload: StagedPayload::Inline(Vec::new()).info(JSON_CONTENT_TYPE),
+    })
+}
+
+/// A JSON submission: the payload is the inline `payload` value, sent
+/// upstream as `application/json`. An absent payload is JSON `null`.
+async fn from_json(
+    state: &AppState,
+    sub: SubmitRequest,
+    staged: &mut StagedBlobs,
+) -> Result<NewRequest, ApiError> {
+    let token = new_token();
+    let mut envelope = envelope(state, &sub, &token).await?;
+    let raw = sub.payload.as_ref().map_or("null", |p| p.get());
+    staged.track(&token);
+    let mut sink = sink(state);
+    sink.push(raw.as_bytes()).await?;
+    let payload = sink.finish(&token).await?;
+    envelope.payload = payload.info(JSON_CONTENT_TYPE);
+    Ok(NewRequest { envelope, payload })
+}
+
+/// A multipart submission: a `request` part holding the JSON envelope and a
+/// `payload` part streamed to storage as opaque bytes of any content type.
+async fn from_multipart(
+    state: &AppState,
+    mut multipart: Multipart,
+    staged: &mut StagedBlobs,
+) -> Result<NewRequest, ApiError> {
+    let token = new_token();
+    staged.track(&token);
+    let mut sub: Option<SubmitRequest> = None;
+    let mut payload: Option<(StagedPayload, String)> = None;
+    while let Some(mut field) = multipart.next_field().await.map_err(bad)? {
+        match field.name() {
+            Some("request") => {
+                if sub.is_some() {
+                    return Err(bad("duplicate request part"));
+                }
+                let mut bytes = Vec::new();
+                while let Some(chunk) = field.chunk().await.map_err(bad)? {
+                    bytes.extend_from_slice(&chunk);
+                    if bytes.len() > MAX_ENVELOPE_BYTES {
+                        return Err(ApiError::TooLarge("request part is too large".into()));
+                    }
+                }
+                sub = Some(serde_json::from_slice(&bytes).map_err(bad)?);
+            }
+            Some("payload") => {
+                if payload.is_some() {
+                    return Err(bad("duplicate payload part"));
+                }
+                let content_type = field
+                    .content_type()
+                    .unwrap_or(DEFAULT_PAYLOAD_CONTENT_TYPE)
+                    .to_owned();
+                let mut sink = sink(state);
+                while let Some(chunk) = field.chunk().await.map_err(bad)? {
+                    sink.push(&chunk).await?;
+                }
+                payload = Some((sink.finish(&token).await?, content_type));
+            }
+            other => return Err(bad(format!("unexpected part {other:?}"))),
+        }
+    }
+    let sub = sub.ok_or_else(|| bad("missing request part"))?;
+    if sub.payload.is_some() {
+        return Err(bad("payload must not be inline in a multipart submission"));
+    }
+    let (payload, content_type) = payload.ok_or_else(|| bad("missing payload part"))?;
+    let mut envelope = envelope(state, &sub, &token).await?;
+    envelope.payload = payload.info(&content_type);
+    Ok(NewRequest { envelope, payload })
+}
+
+fn submitted(r: &NewRequest) -> Submitted {
+    Submitted {
+        id: r.envelope.request.id.clone(),
+        request_token: r.envelope.routing.request_token.clone(),
+    }
+}
+
+/// Commits submissions in a task of its own: a client that disconnects now
+/// cannot separate the commit from the fate of its staged blobs.
+async fn commit(
+    state: &AppState,
+    requests: Vec<NewRequest>,
+    staged: StagedBlobs,
+) -> Result<(), ApiError> {
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        store.submit(requests).await?;
+        staged.committed();
+        Ok::<(), ApiError>(())
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+}
+
+pub async fn submit(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<(StatusCode, Json<Submitted>), ApiError> {
+    let multipart = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("multipart/form-data"));
+    let mut staged = StagedBlobs::new(&state);
+    let new = if multipart {
+        let multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(bad)?;
+        from_multipart(&state, multipart, &mut staged).await?
+    } else {
+        let body = axum::body::to_bytes(request.into_body(), state.limits.json_body)
+            .await
+            .map_err(|e| ApiError::TooLarge(e.to_string()))?;
+        let sub: SubmitRequest = serde_json::from_slice(&body).map_err(bad)?;
+        from_json(&state, sub, &mut staged).await?
+    };
+    let response = submitted(&new);
+    commit(&state, vec![new], staged).await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// Submits many JSON requests in one transaction: all or none.
+pub async fn submit_batch(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<(StatusCode, Json<Vec<Submitted>>), ApiError> {
+    let body = axum::body::to_bytes(request.into_body(), state.limits.json_body)
+        .await
+        .map_err(|e| ApiError::TooLarge(e.to_string()))?;
+    let subs: Vec<SubmitRequest> = serde_json::from_slice(&body).map_err(bad)?;
+    if subs.len() > MAX_BATCH {
+        return Err(bad(format!("at most {MAX_BATCH} requests per batch")));
+    }
+    let mut staged = StagedBlobs::new(&state);
+    let mut prepared = Vec::with_capacity(subs.len());
+    for sub in subs {
+        prepared.push(from_json(&state, sub, &mut staged).await?);
+    }
+    let response = prepared.iter().map(submitted).collect();
+    commit(&state, prepared, staged).await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+#[derive(Deserialize)]
+pub struct CancelBody {
+    ids: Vec<String>,
+}
+
+pub async fn cancel(
+    State(state): State<AppState>,
+    Json(body): Json<CancelBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let marked = state.store.cancel(body.ids, now_millis()).await?;
+    Ok(Json(serde_json::json!({ "cancelled": marked })))
+}
+
+#[derive(Serialize)]
+pub struct QueueStatus {
+    id: String,
+    queue_name: String,
+    worker_pool_id: String,
+    depth: u64,
+    labels: BTreeMap<String, String>,
+}
+
+pub async fn list_queues(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<QueueStatus>>, ApiError> {
+    let mut out = Vec::new();
+    for config in state.queues.snapshot().await {
+        let backlog = state
+            .store
+            .backlog(config.queue_name.clone(), now_secs(), Vec::new())
+            .await?;
+        let labels = labels_of(&config);
+        out.push(QueueStatus {
+            id: labels.queue_id,
+            queue_name: labels.queue_name,
+            worker_pool_id: labels.pool,
+            depth: backlog.depth,
+            labels: config.labels,
+        });
+    }
+    Ok(Json(out))
+}
