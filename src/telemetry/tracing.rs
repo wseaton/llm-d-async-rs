@@ -40,6 +40,14 @@ fn verbosity_filter(verbosity: u8) -> &'static str {
     }
 }
 
+/// Installs the W3C trace-context and baggage propagators.
+pub fn set_propagator() {
+    opentelemetry::global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
+        Box::new(TraceContextPropagator::new()),
+        Box::new(BaggagePropagator::new()),
+    ]));
+}
+
 /// Installs the log subscriber and, when `OTEL_EXPORTER_OTLP_ENDPOINT` is
 /// set, an OTLP/gRPC span exporter with W3C trace-context propagation.
 pub fn init(verbosity: u8) -> Result<TracingGuard, TracingError> {
@@ -72,10 +80,7 @@ pub fn init(verbosity: u8) -> Result<TracingGuard, TracingError> {
                 .build(),
         )
         .build();
-    opentelemetry::global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
-        Box::new(TraceContextPropagator::new()),
-        Box::new(BaggagePropagator::new()),
-    ]));
+    set_propagator();
     let otel = tracing_opentelemetry::layer().with_tracer(provider.tracer(DEFAULT_SERVICE_NAME));
     tracing_subscriber::registry()
         .with(filter)

@@ -328,6 +328,23 @@ impl Metrics {
         Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 
+    /// The rendered value of `llm_d_async_<name>` whose labels include every
+    /// pair in `labels`, or `None` when no such series is rendered.
+    #[cfg(test)]
+    pub fn sample(&self, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        let text = self.render().ok()?;
+        let prefix = format!("llm_d_async_{name}{{");
+        text.lines()
+            .filter(|line| line.starts_with(&prefix))
+            .find(|line| {
+                labels.iter().all(|(k, v)| {
+                    let pair = format!("{k}=\"{v}\"");
+                    line.contains(&format!("{{{pair}")) || line.contains(&format!(",{pair}"))
+                })
+            })
+            .and_then(|line| line.rsplit(' ').next()?.parse().ok())
+    }
+
     pub fn retry(&self, l: &QueueLabels) {
         self.retries.with_label_values(&l.values()).inc();
     }

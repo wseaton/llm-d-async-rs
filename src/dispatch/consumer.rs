@@ -238,3 +238,316 @@ impl Consumer {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tokio::sync::{Notify, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    use crate::clock::now_millis;
+    use crate::dispatch::consumer::Consumer;
+    use crate::dispatch::message::Claimed;
+    use crate::gate::admission::GatingMode;
+    use crate::gate::admission::counters::Counters;
+    use crate::gate::admission::counters::local::LocalCounters;
+    use crate::gate::admission::quota::{QuotaGate, QuotaMode};
+    use crate::gate::test_support::FixedGate;
+    use crate::gate::{SharedGate, Verdict};
+    use crate::store::Store;
+    use crate::store::embedded::test_support::{Fixture, open};
+    use crate::store::queue::Outcome;
+    use crate::store::test_support::new_request;
+    use crate::telemetry::metrics::{Metrics, QueueLabels};
+
+    struct Rig {
+        consumer: Consumer,
+        claims: mpsc::Receiver<Claimed>,
+        _outcomes: mpsc::UnboundedReceiver<Outcome>,
+        _f: Fixture,
+    }
+
+    impl Rig {
+        async fn new(gate: SharedGate, config: serde_json::Value) -> Self {
+            let f = open().await;
+            let (outcomes, outcomes_rx) = mpsc::unbounded_channel();
+            let (tx, claims) = mpsc::channel(64);
+            let mut config = config;
+            config["queue_name"] = json!("q");
+            config["igw_base_url"] = json!("http://gw");
+            let consumer = Consumer {
+                store: Arc::clone(&f.store),
+                metrics: Arc::new(Metrics::new().unwrap()),
+                config: serde_json::from_value(config).unwrap(),
+                labels: QueueLabels::new("q", "q", "p"),
+                gate,
+                outcomes,
+                results: Arc::new(Notify::new()),
+                tx,
+                poll_interval: Duration::from_millis(100),
+                batch_size: 10,
+            };
+            consumer.metrics.init_gate_decisions(&consumer.labels);
+            Self {
+                consumer,
+                claims,
+                _outcomes: outcomes_rx,
+                _f: f,
+            }
+        }
+
+        fn store(&self) -> &Store {
+            &self.consumer.store
+        }
+
+        async fn submit(&self, id: &str, deadline: i64, metadata: &[(&str, &str)]) {
+            let mut req = new_request(id, "q", deadline);
+            for (k, v) in metadata {
+                req.envelope
+                    .request
+                    .metadata
+                    .insert((*k).into(), (*v).into());
+            }
+            self.store().submit(vec![req]).await.unwrap();
+        }
+
+        async fn poll(&self) {
+            self.consumer.poll(&CancellationToken::new()).await.unwrap();
+        }
+
+        fn claimed(&mut self) -> Vec<Claimed> {
+            let mut out = Vec::new();
+            while let Ok(c) = self.claims.try_recv() {
+                out.push(c);
+            }
+            out
+        }
+
+        async fn queued(&self) -> usize {
+            self.store()
+                .peek("q".into(), 100, now_millis())
+                .await
+                .unwrap()
+                .len()
+        }
+
+        async fn results(&self) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            while let Some(r) = self
+                .store()
+                .pop_result("results".into(), now_millis())
+                .await
+                .unwrap()
+            {
+                out.push(serde_json::from_str(&r).unwrap());
+            }
+            out
+        }
+
+        fn gate_decisions(&self, reason: &str) -> f64 {
+            self.consumer
+                .metrics
+                .sample(
+                    "async_gate_decisions_total",
+                    &[("queue_id", "q"), ("reason", reason)],
+                )
+                .unwrap()
+        }
+    }
+
+    fn secs_from_now(secs: i64) -> i64 {
+        now_millis() / 1000 + secs
+    }
+
+    fn fixed(budget: f64, verdict: Verdict) -> SharedGate {
+        Arc::new(FixedGate::new(budget, verdict))
+    }
+
+    #[tokio::test]
+    async fn a_partial_budget_scales_the_batch() {
+        let mut rig = Rig::new(fixed(0.3, Verdict::Continue), json!({})).await;
+        for i in 0..10 {
+            rig.submit(&format!("r{i}"), secs_from_now(60 + i), &[])
+                .await;
+        }
+        rig.poll().await;
+        let ids: Vec<String> = rig
+            .claimed()
+            .into_iter()
+            .map(|c| c.envelope.request.id)
+            .collect();
+        assert_eq!(
+            ids,
+            ["r0", "r1", "r2"],
+            "floor(10 x 0.3), earliest deadline first"
+        );
+        assert_eq!(rig.queued().await, 7);
+        assert_eq!(
+            rig.consumer
+                .metrics
+                .sample("async_dispatch_budget", &[("queue_id", "q")]),
+            Some(0.3)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_budget_counts_gate_closed_only_when_work_waits() {
+        let mut rig = Rig::new(fixed(0.0, Verdict::Continue), json!({})).await;
+        rig.poll().await;
+        assert_eq!(rig.gate_decisions("gate_closed"), 0.0, "nothing waiting");
+        rig.submit("r", secs_from_now(60), &[]).await;
+        rig.poll().await;
+        assert_eq!(rig.gate_decisions("gate_closed"), 1.0);
+        assert!(rig.claimed().is_empty());
+        assert_eq!(rig.queued().await, 1);
+    }
+
+    #[tokio::test]
+    async fn refused_requests_stay_queued_and_count_their_reason() {
+        let counters: Arc<dyn Counters> = Arc::new(LocalCounters::default());
+        let quota = QuotaGate::new(
+            "userid".into(),
+            "quota:".into(),
+            QuotaMode::Concurrency,
+            GatingMode::Blocking,
+            1,
+            Duration::from_secs(10),
+            counters,
+        );
+        let mut rig = Rig::new(Arc::new(quota), json!({})).await;
+        rig.submit("tenant-1", secs_from_now(60), &[("userid", "t")])
+            .await;
+        rig.submit("tenant-2", secs_from_now(61), &[("userid", "t")])
+            .await;
+        rig.submit("anonymous", secs_from_now(62), &[]).await;
+        rig.poll().await;
+        let claimed = rig.claimed();
+        let ids: Vec<&str> = claimed
+            .iter()
+            .map(|c| c.envelope.request.id.as_str())
+            .collect();
+        assert_eq!(ids, ["tenant-1", "anonymous"]);
+        assert_eq!(rig.gate_decisions("quota_exhausted"), 1.0);
+        assert_eq!(rig.gate_decisions("gate_closed"), 0.0);
+        let queued = rig
+            .store()
+            .peek("q".into(), 10, now_millis())
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].envelope.as_ref().unwrap().request.id, "tenant-2");
+
+        drop(claimed);
+        rig.poll().await;
+        assert_eq!(rig.claimed().len(), 1, "the slot came back with the claim");
+    }
+
+    #[tokio::test]
+    async fn a_closed_gate_counts_gate_closed() {
+        let mut rig = Rig::new(fixed(1.0, Verdict::Refuse), json!({})).await;
+        rig.submit("r", secs_from_now(60), &[]).await;
+        rig.poll().await;
+        assert!(rig.claimed().is_empty());
+        assert_eq!(rig.queued().await, 1);
+        assert_eq!(rig.gate_decisions("gate_closed"), 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_request_finishes_with_gate_dropped() {
+        let mut rig = Rig::new(fixed(1.0, Verdict::Drop(None)), json!({})).await;
+        rig.submit("r", secs_from_now(60), &[]).await;
+        rig.poll().await;
+        assert!(rig.claimed().is_empty());
+        assert_eq!(rig.queued().await, 0);
+        let results = rig.results().await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["id"], "r");
+        assert_eq!(results[0]["error_code"], "GATE_DROPPED");
+        assert_eq!(rig.gate_decisions("dropped"), 1.0);
+    }
+
+    #[tokio::test]
+    async fn expired_and_cancelled_requests_finish_without_a_claim() {
+        let gate = Arc::new(FixedGate::new(1.0, Verdict::Continue));
+        let mut rig = Rig::new(gate.clone(), json!({})).await;
+        rig.submit("expired", secs_from_now(-1), &[]).await;
+        rig.submit("cancelled", secs_from_now(60), &[]).await;
+        rig.store()
+            .cancel(vec!["cancelled".into()], now_millis())
+            .await
+            .unwrap();
+        rig.poll().await;
+        assert!(rig.claimed().is_empty());
+        assert_eq!(rig.queued().await, 0);
+        assert_eq!(
+            gate.held.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "never gated"
+        );
+        let mut codes: Vec<(String, String)> = rig
+            .results()
+            .await
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_owned(),
+                    r["error_code"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                ("cancelled".to_owned(), "CANCELLED".to_owned()),
+                ("expired".to_owned(), "DEADLINE_EXCEEDED".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn claims_carry_the_queues_routing() {
+        let mut rig = Rig::new(
+            fixed(1.0, Verdict::Continue),
+            json!({"id": "qid", "result_queue_name": "custom", "result_ttl_seconds": 30,
+                   "labels": {"tier": "batch"}}),
+        )
+        .await;
+        rig.submit("r", secs_from_now(60), &[]).await;
+        rig.poll().await;
+        let claimed = rig.claimed();
+        let routing = &claimed[0].envelope.routing;
+        assert_eq!(routing.queue_id, "qid");
+        assert_eq!(routing.result_queue_name, "custom");
+        assert_eq!(routing.result_ttl_seconds, 30);
+        assert!(routing.result_routing_resolved);
+        assert_eq!(routing.labels["tier"], "batch");
+    }
+
+    #[tokio::test]
+    async fn a_gate_error_leaves_the_request_queued() {
+        let Some(pg) = crate::store::postgres::test_support::fixture().await else {
+            return;
+        };
+        let quota = QuotaGate::new(
+            "userid".into(),
+            "quota:".into(),
+            QuotaMode::Concurrency,
+            GatingMode::Blocking,
+            1,
+            Duration::from_secs(10),
+            Arc::new(pg.pg.counters()),
+        );
+        pg.db.pool.close();
+        let mut rig = Rig::new(Arc::new(quota), json!({})).await;
+        rig.submit("r", secs_from_now(60), &[("userid", "t")]).await;
+        rig.poll().await;
+        assert!(rig.claimed().is_empty());
+        assert_eq!(rig.queued().await, 1);
+        assert!(rig.results().await.is_empty());
+        assert_eq!(rig.gate_decisions("error"), 1.0);
+    }
+}

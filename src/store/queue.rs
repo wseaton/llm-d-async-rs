@@ -71,7 +71,7 @@ pub enum Admitted {
 }
 
 /// The end of one claim.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Outcome {
     Finish {
         claim: ClaimRef,
