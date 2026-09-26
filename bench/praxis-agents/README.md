@@ -89,16 +89,17 @@ sequenceDiagram
 
 On the cluster (GLM-4.7-Flash on an H200, llm-d-router v0.10.0):
 
-- **Codex** fixed a bug and ran its tests through the whole stack: six tool
-  calls in 6.5 s, with 88% of prompt tokens served from vLLM's prefix cache.
-  (Those runs sent foreground calls through a since-removed OpenAI route on
-  the processor; they now go straight to the router.)
 - **Through the coordinator**, a resumable queue needs no changes. The
   coordinator passes `/inference/v1/generate` through its decode step and
-  forwards the objective header. With 16 `batch` generations of 6,000 tokens
-  filling the pool, a burst of 8 `interactive` requests made the EPP evict one
-  of them mid-stream. The processor resumed it with 1,016 saved tokens, back
-  through the coordinator, and all 16 finished at exactly 6,000 tokens.
+  forwards the objective header. In the final run, 16 `batch` generations of
+  6,000 tokens went in through the request API and filled the pool, and a burst
+  of 8 `interactive` requests made the EPP evict 6 of them mid-stream. The
+  processor resumed each from 683 to 686 saved tokens, back through the
+  coordinator, and all 16 finished at exactly 6,000 tokens.
+- **Codex** fixed a bug and ran its tests through the whole stack: six tool
+  calls in 6.5 s, with 88% of prompt tokens served from vLLM's prefix cache.
+  Edit tasks are unreliable with this model, though; see
+  [Codex](#codex).
 
 ## Where each piece belongs
 
@@ -210,6 +211,23 @@ What Codex sends, and what it took:
 
 In-cluster service addresses are private, so Praxis needs
 `insecure_options.allow_private_upstreams: true` there.
+
+The first runs sent foreground calls through an OpenAI route on the processor
+that has since been removed; foreground calls now go straight to the router.
+On that path, a two-fix task (`add` subtracts, `mul` is missing) finished in 1
+of 6 runs. A logging proxy between Praxis and the router showed why, and none
+of it is in this stack:
+
+- Codex has no metadata for GLM-4.7-Flash, so it offers edits only through
+  `exec_command`, not an `apply_patch` tool.
+- The model calls `apply_patch` anyway, with a `command` array in the style
+  of Codex's old shell tool.
+- vLLM's GLM tool parser discards a call to an undeclared tool, and the turn
+  ends with no text and no call, so Codex stops. Replaying the captured
+  request, this happens with and without streaming (5 and 2 of 10).
+- Declaring the tool through a Codex model catalog does not help: Codex's
+  `apply_patch` is a grammar-constrained freeform tool, which Praxis refuses
+  to lower for a Chat Completions backend.
 
 ## Configuration
 
@@ -329,6 +347,7 @@ offline; fetch it once. The SDK clients run through `uv`.
   Cancel is pre-dispatch at the processor; an in-flight generation finishes
   and its result is discarded. DELETE does not cancel at the processor.
 - `in_progress` means claimed by a processor, including its dispatch buffer.
+- Codex edit tasks on GLM-4.7-Flash are unreliable (see [Codex](#codex)).
 - The processor renders on its own `render_url`, not through the coordinator's
   render step. Through the coordinator it was tested on an aggregated pool
   only; how the coordinator's prefill/decode phasing treats the processor's
