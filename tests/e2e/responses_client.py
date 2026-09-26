@@ -17,6 +17,8 @@ create() arguments). Scenarios:
   function call through previous_response_id.
 - `background_chain`: the same two turns in background mode, then a third,
   foreground turn continuing the second.
+- `stream`: a streamed create, recording the event types, the reasoning and
+  text deltas, and the final response.
 """
 
 import json
@@ -112,6 +114,17 @@ def main() -> None:
                 model=request["model"], previous_response_id=second.id, max_output_tokens=8, input="Thanks."
             )
             out = {"first": summary(first), "second": summary(second), "third": summary(third)}
+        elif scenario == "stream":
+            kinds, reasoning, text, final = [], "", "", None
+            for event in client.responses.create(stream=True, **request):
+                kinds.append(event.type)
+                if event.type == "response.reasoning_text.delta":
+                    reasoning += event.delta
+                elif event.type == "response.output_text.delta":
+                    text += event.delta
+                elif event.type in {"response.completed", "response.failed", "response.incomplete"}:
+                    final = summary(event.response)
+            out = {"events": kinds, "reasoning": reasoning, "text": text, "final": final}
         else:
             raise SystemExit(f"unknown scenario {scenario}")
     except openai.APIStatusError as e:

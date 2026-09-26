@@ -348,6 +348,35 @@ async fn praxis_ai_in_front_of_the_processor() {
         "{continued}"
     );
 
+    // A streamed call, as Codex makes every call: reasoning streams as its own
+    // item ahead of the text, through an eviction.
+    gateway.clear();
+    gateway.then(Generate::Cut(chat_cut));
+    let got = praxis.sdk("stream", chat_request()).await;
+    assert_eq!(got["final"]["status"], "completed", "{got}");
+    assert_eq!(got["text"], ANSWER);
+    assert_eq!(got["final"]["text"], ANSWER);
+    assert_eq!(
+        got["final"]["output_types"],
+        json!(["reasoning", "message"])
+    );
+    assert!(
+        got["reasoning"]
+            .as_str()
+            .unwrap()
+            .starts_with("The user wants a short description of Paris"),
+        "{got}"
+    );
+    let events: Vec<&str> = got["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    let first = |kind: &str| events.iter().position(|e| *e == kind).unwrap();
+    assert!(first("response.reasoning_text.delta") < first("response.output_text.delta"));
+    assert_resumed(&gateway);
+
     // What agent clients send that Chat Completions cannot represent runs
     // anyway: no reasoning summary, no truncation.
     let mut agentic = chat_request();
