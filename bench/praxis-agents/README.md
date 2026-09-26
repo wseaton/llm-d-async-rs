@@ -1,37 +1,71 @@
-# Agents and LLM tools through Praxis AI and llm-d-async
+# Agents on llm-d: background work that survives eviction
 
-This experiment puts [Praxis AI](https://github.com/praxis-proxy/ai) in front of
-llm-d-async so that ordinary agents, SDKs and eval harnesses get queueing,
-priority, deadlines and eviction-safe generation without code changes.
+Can unmodified agents and SDKs (Codex, the OpenAI SDK, eval harnesses) run on
+llm-d as prioritized background work that the router may evict at any time,
+without losing a token? This experiment says yes, and shows which project each
+piece belongs in.
 
 > [!IMPORTANT]
-> The Rust processor used here is experimental. It is a place to prove designs (resume
-> from saved tokens, OpenAI-compatible routes, results by request, the
+> The Rust processor used here is experimental. It is a place to prove designs
+> (resume from saved tokens, OpenAI-compatible routes, results by request, the
 > Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
 > What proves out is meant to be upstreamed and, where the project decides it
 > belongs, refactored back into the Go processor. It is not a supported
 > replacement for it.
 
 ```text
- OpenAI SDK / agent ──► Praxis AI ──────────────► llm-d-async ──────────► gateway + EPP ──► vLLM
-   Responses API        Responses ⇄ Chat           durable queues          llm-d-router      render
-                        response store             deadlines, retries,     flow control,     generate
-                        background lifecycle       resume from tokens      eviction          derender
+ agent / SDK ──► Praxis AI ──────────► llm-d-async ─────────► llm-d-router ─────────────► vLLM
+ Responses API   Responses ⇄ Chat      durable queues,        coordinator (optional),    render
+                 response store,       deadlines, retries,    EPP flow control,          generate
+                 background lifecycle  resume from tokens     eviction, prefix routing   derender
 ```
 
-Status (2026-09-26): all three goals work end to end against a real vLLM 0.30
-frontend with the official OpenAI SDK, with generate streams evicted
-mid-generation. **Codex CLI runs agentic tasks through the whole stack on the
-GPU cluster** (GLM-4.7-Flash on H200s behind llm-d-router); see
-[Codex](#codex) and [`cluster/`](cluster/README.md).
+The loop that makes eviction safe: llm-d-async renders the request to token
+IDs, streams `/inference/v1/generate` through the router, and derenders the
+output. When flow control evicts a `batch` generation to make room for
+`interactive` work, the processor keeps the tokens it received and continues
+from prompt plus saved tokens once there is room again. The caller sees one
+uninterrupted response.
 
-## Goals
+## Status (2026-09-26)
 
-| Goal | How | Status |
-|---|---|---|
-| **1. Proxy normal APIs into async** | Praxis translates Responses to Chat Completions and calls llm-d-async's OpenAI-compatible routes, which queue the request and hold the connection until its result | works |
-| **2. Background mode** (`background: true`) | Praxis's response store submits the request to llm-d-async, stores it `queued`, and on `GET /v1/responses/{id}` claims the result or reports `in_progress`; `POST …/cancel` cancels | works |
-| **3. Seamless eviction and resume** | llm-d-async sends every attempt through vLLM render → `/inference/v1/generate` → derender; an evicted stream continues from the rendered prompt plus the saved tokens | works, token-identical |
+| Goal | Result |
+|---|---|
+| Unmodified OpenAI clients get queueing, priority and deadlines | works, OpenAI SDK and Codex CLI |
+| Responses `background: true` (submit, poll, cancel) | works through Praxis AI |
+| Eviction and resume invisible to the caller | token-identical locally; on the GPU cluster an evicted generation resumed through the llm-d coordinator |
+
+On the cluster (GLM-4.7-Flash on an H200, llm-d-router v0.10.0):
+
+- **Codex** fixed a bug and ran its tests through the whole stack: six tool
+  calls in 6.5 s, with 88% of prompt tokens served from vLLM's prefix cache.
+- **Through the coordinator**, a resumable queue needs no changes. The
+  coordinator passes `/inference/v1/generate` through its decode step and
+  forwards the objective header. With 16 `batch` generations of 6,000 tokens
+  filling the pool, a burst of 8 `interactive` requests made the EPP evict one
+  of them mid-stream. The processor resumed it with 1,016 saved tokens, back
+  through the coordinator, and all 16 finished at exactly 6,000 tokens.
+
+## Where each piece belongs
+
+| Piece | Built here | Upstream home | Next step |
+|---|---|---|---|
+| OpenAI door for queued work | processor routes (`/v1/chat/completions`, `GET /v1/requests/{id}`) | llm-d-router coordinator `async-broker` ([#2325](https://github.com/llm-d/llm-d-router/pull/2325), merged) with [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394) | use the broker; offer SSE keepalives for held `stream: true` calls if it lacks them |
+| Resume inside one request | the render → generate → derender loop | coordinator request migration ([llm-d-router#2345](https://github.com/llm-d/llm-d-router/issues/2345), proposal), which lists evict-then-resume as a goal | bring this experiment's evidence to #2345 |
+| Resume across requeues | progress saved with the queued request | llm-d-async (Go) | a partial-generation result the processor persists, and a continuation it sends on redispatch |
+| Eviction policy | used as is | flow control ([llm-d-router#2061](https://github.com/llm-d/llm-d-router/pull/2061), design) | none; resume is what makes evicting `batch` work cheap |
+| Background Responses | Praxis patch 0002 | Praxis background jobs ([praxis-ai#32](https://github.com/praxis-proxy/ai/issues/32), blocked on [praxis#807](https://github.com/praxis-proxy/praxis/issues/807)) | a data point for #32: the lifecycle works with an external durable queue as the runtime |
+| Agent compatibility | Praxis patch 0002: streaming reasoning, `summary: omit`, `truncation_auto: disabled` | [praxis-ai#31](https://github.com/praxis-proxy/ai/issues/31), [#951](https://github.com/praxis-proxy/ai/issues/951) | discuss with #31's assignee; the two options go against today's fail-closed decisions |
+| Config watcher fix | Praxis patch 0001 | Praxis core ([praxis#1076](https://github.com/praxis-proxy/praxis/issues/1076), [praxis-ai#1015](https://github.com/praxis-proxy/ai/issues/1015)) | adopt core's watcher |
+| Token layer gaps | worked around in the processor | vLLM | report the stop token in derendered text; [vllm#58588](https://github.com/vllm-project/vllm/pull/58588) (`output_mode: text`) would remove the derender call |
+
+Nothing above has been proposed upstream yet; Praxis also requires issue
+assignment before a PR. The Praxis patches are on the fork for linking:
+[`reload-config-on-content-change`](https://github.com/wseaton/ai/tree/reload-config-on-content-change)
+(0001) and
+[`llm-d-async-background`](https://github.com/wseaton/ai/tree/llm-d-async-background)
+(0001 and 0002,
+[diff](https://github.com/praxis-proxy/ai/compare/main...wseaton:ai:llm-d-async-background)).
 
 ## What was built
 
@@ -69,12 +103,7 @@ GPU cluster** (GLM-4.7-Flash on H200s behind llm-d-router); see
 ### Praxis AI (patches in [`praxis-ai/`](praxis-ai))
 
 Against `praxis-proxy/ai` at `b9d60167` (Praxis core 0.7.0), applied in order
-with `git apply`. The same changes are on the fork as commits:
-[`reload-config-on-content-change`](https://github.com/wseaton/ai/tree/reload-config-on-content-change)
-(0001) and
-[`llm-d-async-background`](https://github.com/wseaton/ai/tree/llm-d-async-background)
-(0001 and 0002,
-[diff](https://github.com/praxis-proxy/ai/compare/main...wseaton:ai:llm-d-async-background)).
+with `git apply`.
 
 1. [`0001`](praxis-ai/0001-reload-config-only-when-its-content-changed.patch):
    **config watcher fix.** The watcher observed the config's directory and
@@ -149,7 +178,8 @@ llm-d-async queue (`transport.json`):
 
 `render_url` is any vLLM serving the queue's model with `--enable-scale-out`
 (render and derender use no GPU). Run vLLM with
-`--enable-prompt-tokens-details` to report cached tokens.
+`--enable-prompt-tokens-details` to report cached tokens. `igw_base_url` may be
+the EPP's gateway or a gateway fronted by the llm-d coordinator.
 
 Praxis AI: see `examples/configs/openai/responses/background-llm-d-async.yaml`
 from patch 0002; `tests/e2e/praxis.rs` generates the same configuration with
@@ -195,6 +225,7 @@ cuts, stalls or sheds generate streams the way flow control evicts them.
 - **`tests/e2e/praxis.rs`**, the OpenAI SDK's Responses API through Praxis AI:
   - foreground, and foreground evicted after 24 tokens (the continuation
     carries 20 prompt + 24 saved tokens), with the same answer and reasoning;
+  - streamed foreground with reasoning events ahead of the message;
   - background `queued → in_progress → completed`, evicted on the way;
   - idempotent cancel;
   - function calls in both modes;
@@ -206,6 +237,9 @@ cuts, stalls or sheds generate streams the way flow control evicts them.
   turn 1's 207 prompt-plus-output tokens (about 90% of turn 2's prompt). The
   prior reasoning replays intact; the difference is the chat template
   re-serializing the tool call, as native chat serving does too.
+
+On the GPU cluster: the Codex runs and the coordinator eviction run above;
+[`cluster/`](cluster/README.md) deploys both.
 
 Earlier cluster runs (llm-d-router v0.10.0, vLLM 0.30.0, the text-continuation
 path this replaces) showed the value of resuming under flow-control eviction:
@@ -254,6 +288,10 @@ offline; fetch it once. The SDK clients run through `uv`.
   Cancel is pre-dispatch at the processor; an in-flight generation finishes
   and its result is discarded. DELETE does not cancel at the processor.
 - `in_progress` means claimed by a processor, including its dispatch buffer.
+- The processor renders on its own `render_url`, not through the coordinator's
+  render step. Through the coordinator it was tested on an aggregated pool
+  only; how the coordinator's prefill/decode phasing treats the processor's
+  generate calls is untested.
 - Praxis's llm-d `ext_proc` mode (`integrations/llmd/ext-proc`) cannot carry
   EPP eviction yet: the EPP evicts with an unsolicited `ImmediateResponse`
   during the response (llm-d-router v0.10.0 `pkg/epp/handlers/server.go:392`),
@@ -262,61 +300,14 @@ offline; fetch it once. The SDK clients run through `uv`.
   does.
 - The Go and Python clients do not expose `result_delivery` or request status.
 
-## Related upstream work
-
-Checked 2026-09-26. Overlaps to settle before proposing any of this upstream:
-
-- **OpenAI routes and results by request (goal 1)** duplicate llm-d's chosen
-  design: the router coordinator's `async-broker` step
-  ([llm-d-router#2325](https://github.com/llm-d/llm-d-router/pull/2325),
-  merged) serves enqueue, wait and passthrough modes with the same
-  `GET /v1/requests/{id}`, and
-  [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394) (merged)
-  adds result TTLs and objective stamping. A standalone frontend
-  ([llm-d-async#392](https://github.com/llm-d/llm-d-async/pull/392)) was closed
-  in favor of it.
-- **Resume from tokens (goal 3)** overlaps
-  [llm-d-router#2345](https://github.com/llm-d/llm-d-router/issues/2345), an
-  open coordinator proposal to migrate in-flight completions by appending the
-  generated tokens to the prompt, which lists evict-then-resume as a goal.
-  Eviction itself is
-  [llm-d-router#2061](https://github.com/llm-d/llm-d-router/pull/2061) (design,
-  open). In-flight cancel is
-  [llm-d-async#422](https://github.com/llm-d/llm-d-async/issues/422).
-- **vLLM token layer**: [vllm#56851](https://github.com/vllm-project/vllm/issues/56851)
-  and [vllm#58588](https://github.com/vllm-project/vllm/pull/58588) add
-  `output_mode: text` to generate, which would drop the derender call;
-  [vllm#57593](https://github.com/vllm-project/vllm/issues/57593) tracks
-  derender drifting from native chat responses. The stop token in derendered
-  text is not reported.
-- **Praxis watcher fix (0001)** is
-  [praxis-ai#1015](https://github.com/praxis-proxy/ai/issues/1015); the
-  maintainers want it in core via
-  [praxis#1076](https://github.com/praxis-proxy/praxis/issues/1076), whose
-  watcher already filters paths and hashes content.
-- **Praxis background mode (0002)** conflicts with the plan in
-  [praxis-ai#32](https://github.com/praxis-proxy/ai/issues/32) (assigned,
-  blocked on the core jobs spike
-  [praxis#807](https://github.com/praxis-proxy/praxis/issues/807)), which rules
-  out a direct backend call from the filter, and with
-  [praxis-ai#1323](https://github.com/praxis-proxy/ai/pull/1323) (open), which
-  has the store reject background requests it owns. Cancel is
-  [praxis-ai#45](https://github.com/praxis-proxy/ai/issues/45) and atomic
-  status transitions
-  [praxis-ai#462](https://github.com/praxis-proxy/ai/issues/462).
-  `summary: omit` and `truncation_auto: disabled` go against the fail-closed
-  decisions in [praxis-ai#951](https://github.com/praxis-proxy/ai/issues/951)
-  and [praxis-ai#31](https://github.com/praxis-proxy/ai/issues/31), even as
-  opt-in. Streaming reasoning is the follow-up promised in #31 by its
-  assignee; no PR for it is open. Codex tool compatibility is already
-  upstream.
-
 ## Next
 
-1. Codex under load: concurrent Codex sessions as `interactive` with a
+1. Take the resume evidence to
+   [llm-d-router#2345](https://github.com/llm-d/llm-d-router/issues/2345) and
+   propose the partial-generation contract between the coordinator and
+   llm-d-async.
+2. Codex under load: concurrent Codex sessions as `interactive` with a
    `batch` background load evicted around them, measuring resumes, tail
    latency and prefix hits.
-2. Upstream: vLLM derender reasoning-token counts (`count_reasoning_tokens`);
-   Praxis PRs for patches 0001 and 0002; Praxis ext_proc response-phase
-   eviction.
-3. Detached background agentic loops in Praxis (server-side tools).
+3. Praxis: agree on background mode and agent compatibility on #32 and #31
+   before opening PRs; report the derender stop token to vLLM.

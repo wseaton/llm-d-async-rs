@@ -11,11 +11,16 @@ codex (laptop) ──port-forward──► agents-praxis ──► agents-proces
 - Router: llm-d-router v0.10.0 standalone chart, flow control with eviction,
   precise prefix routing from vLLM KV events (`router-values.yaml`).
   Objectives: `interactive` (priority 10) and `batch` (priority -1, evictable).
-- Processor: one resumable queue, `agents`, rendering and derendering on the
-  vLLM pods.
+- Processor: resumable queues rendering and derendering on the vLLM pods:
+  `agents` (`interactive`) straight to the EPP gateway, and `agents-coord`
+  (`batch`) through the coordinator.
 - Praxis AI with both patches from `../praxis-ai/`: foreground Responses
   calls go to the processor's `/v1/chat/completions` as `interactive`;
   `background: true` calls go through the processor's request API as `batch`.
+- The llm-d coordinator (`coordinator.yaml`): `agents-coord-gw` routes requests
+  with an `EPP-Profile` header to the same EPP and everything else to a
+  decode-only coordinator, as llm-d-router's coordinator e2e does. The
+  processor's `agents-coord` queue (`batch`) dispatches through it.
 
 ## Deploy
 
@@ -40,6 +45,7 @@ helm dependency build /tmp/router/config/charts/llm-d-router-standalone
 helm --kube-context coreweave-waldorf -n weaton-dev install agents \
   /tmp/router/config/charts/llm-d-router-standalone -f router-values.yaml
 
+kubectl $CTX apply -f coordinator.yaml
 sed -e "s#PROCESSOR_IMAGE#$PROCESSOR#" -e "s#PRAXIS_IMAGE#$PRAXIS#" stack.yaml | kubectl $CTX apply -f -
 kubectl $CTX port-forward svc/agents-praxis 18125:8080
 ```
@@ -52,6 +58,30 @@ CODEX_HOME=$PWD/../codex PRAXIS_API_KEY=x codex exec --skip-git-repo-check "<tas
 
 `../codex/config.toml` points Codex at the port-forward with the Responses wire
 API and disables the hosted web search tool.
+
+## Evict through the coordinator
+
+From a pod in the namespace: 16 long `batch` generations through the
+coordinator queue, then 8 `interactive` requests straight to the EPP gateway.
+
+```sh
+BATCH='{"model":"zai-org/GLM-4.7-Flash","messages":[{"role":"user","content":"Write a long story."}],"max_tokens":6000,"ignore_eos":true}'
+for i in $(seq 16); do
+  curl -s -H 'content-type: application/json' -H 'x-llm-d-async-queue: agents-coord' \
+    -H 'x-llm-d-async-timeout: 20m' -d "$BATCH" http://agents-processor:8080/v1/chat/completions &
+done
+sleep 8
+for i in $(seq 8); do
+  curl -s -H 'content-type: application/json' -H 'x-llm-d-inference-objective: interactive' \
+    -d '{"model":"zai-org/GLM-4.7-Flash","messages":[{"role":"user","content":"Name three colors."}],"max_tokens":200}' \
+    http://agents-epp:80/v1/chat/completions &
+done
+wait
+```
+
+Eviction shows as `Request evicted by flow control` in the EPP log and
+`resuming interrupted generation` in the processor's; every batch response
+still reports 6,000 completion tokens.
 
 ## Teardown
 

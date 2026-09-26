@@ -59,6 +59,9 @@ data:
     {"poll_interval_ms": 100, "queues": [
       {"queue_name": "agents", "igw_base_url": "http://agents-epp:80",
        "request_path_url": "/v1/chat/completions", "inference_objective": "interactive",
+       "resumable": true, "render_url": "http://agents-vllm:8000"},
+      {"queue_name": "agents-coord", "igw_base_url": "http://agents-coord-gw:8081",
+       "request_path_url": "/v1/chat/completions", "inference_objective": "batch",
        "resumable": true, "render_url": "http://agents-vllm:8000"}
     ]}
 ---

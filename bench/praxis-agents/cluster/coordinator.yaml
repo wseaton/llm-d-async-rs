@@ -1,0 +1,216 @@
+# The llm-d coordinator in front of the agents EPP, wired as llm-d-router's
+# coordinator e2e wires it: agents-coord-gw sends requests with an EPP-Profile
+# header to the EPP and everything else to agents-coordinator, which re-enters
+# the gateway with EPP-Profile: decode.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agents-coordinator
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+data:
+  coordinator.yaml: |
+    log_level: 2
+    server:
+      listen_addr: ":8080"
+      read_timeout: 30s
+      write_timeout: 30m
+      shutdown_timeout: 25s
+    gateway:
+      address: "http://agents-coord-gw:8081"
+      max_idle_conns_per_host: 200
+      idle_conn_timeout: 90s
+      timeout: 30m
+    pipeline:
+      use_openai_format: true
+      steps:
+        - type: decode
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents-coordinator
+  labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-coordinator}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: agents-coordinator}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-coordinator}
+    spec:
+      containers:
+        - name: coordinator
+          image: ghcr.io/llm-d/llm-d-router-coordinator:v0.10.0
+          args: ["--config", "/etc/coordinator/coordinator.yaml"]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8080}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "1", memory: 512Mi}
+            limits: {memory: 2Gi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/coordinator}
+      volumes:
+        - {name: config, configMap: {name: agents-coordinator}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agents-coordinator
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+spec:
+  selector: {app: agents-coordinator}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agents-coord-gw
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+data:
+  envoy.yaml: |
+    admin:
+      address: {socket_address: {address: 127.0.0.1, port_value: 19000}}
+    static_resources:
+      listeners:
+        - name: ready
+          address: {socket_address: {address: 0.0.0.0, port_value: 19001}}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: ready
+                    route_config:
+                      virtual_hosts:
+                        - {name: ready, domains: ["*"], routes: []}
+                    http_filters:
+                      - name: envoy.filters.http.health_check
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+                          pass_through_mode: false
+                          headers: [{name: ":path", string_match: {exact: "/ready"}}]
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        - name: gateway
+          address: {socket_address: {address: 0.0.0.0, port_value: 8081}}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: gateway
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            text_format_source:
+                              inline_string: "%REQ(:METHOD)% %REQ(:PATH)% code=%RESPONSE_CODE% cluster=%UPSTREAM_CLUSTER% upstream=%UPSTREAM_HOST% epp-profile=%REQ(EPP-PROFILE)% dur=%DURATION%\n"
+                    route_config:
+                      virtual_hosts:
+                        - name: gateway
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                                headers: [{name: EPP-Profile, present_match: true}]
+                              route: {cluster: original_destination_cluster, timeout: 86400s, idle_timeout: 86400s}
+                            - match: {prefix: "/"}
+                              route: {cluster: coordinator, timeout: 86400s, idle_timeout: 86400s}
+                              typed_per_filter_config:
+                                envoy.filters.http.ext_proc:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
+                                  disabled: true
+                    http_filters:
+                      - name: envoy.filters.http.ext_proc
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                          failure_mode_allow: false
+                          grpc_service:
+                            envoy_grpc: {cluster_name: ext_proc, authority: "agents-epp:9002"}
+                            timeout: 10s
+                          processing_mode:
+                            request_header_mode: SEND
+                            response_header_mode: SEND
+                            request_body_mode: FULL_DUPLEX_STREAMED
+                            response_body_mode: FULL_DUPLEX_STREAMED
+                            request_trailer_mode: SEND
+                            response_trailer_mode: SEND
+                          message_timeout: 1000s
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                          suppress_envoy_headers: true
+      clusters:
+        - name: original_destination_cluster
+          type: ORIGINAL_DST
+          connect_timeout: 1000s
+          lb_policy: CLUSTER_PROVIDED
+          original_dst_lb_config:
+            use_http_header: true
+            http_header_name: x-gateway-destination-endpoint
+        - name: coordinator
+          type: STRICT_DNS
+          connect_timeout: 5s
+          load_assignment:
+            cluster_name: coordinator
+            endpoints:
+              - lb_endpoints:
+                  - endpoint: {address: {socket_address: {address: agents-coordinator, port_value: 8080}}}
+        - name: ext_proc
+          type: STRICT_DNS
+          connect_timeout: 10s
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              common_tls_context:
+                validation_context:
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config: {http2_protocol_options: {}}
+          load_assignment:
+            cluster_name: ext_proc
+            endpoints:
+              - lb_endpoints:
+                  - endpoint: {address: {socket_address: {address: agents-epp, port_value: 9002}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents-coord-gw
+  labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-coord-gw}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: agents-coord-gw}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-coord-gw}
+    spec:
+      containers:
+        - name: envoy
+          image: docker.io/envoyproxy/envoy:distroless-v1.33.2
+          command: ["envoy"]
+          args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+          ports: [{name: http, containerPort: 8081}]
+          readinessProbe:
+            httpGet: {path: /ready, port: 19001}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/envoy}
+      volumes:
+        - {name: config, configMap: {name: agents-coord-gw}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agents-coord-gw
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+spec:
+  selector: {app: agents-coord-gw}
+  ports: [{name: http, port: 8081, targetPort: 8081}]
