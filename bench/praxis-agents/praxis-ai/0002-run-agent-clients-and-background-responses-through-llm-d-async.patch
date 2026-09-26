@@ -924,473 +924,6 @@ index ba9223ee..b0599d03 100644
  #[tokio::test]
  async fn vllm_reasoning_content_is_extracted_end_to_end() {
      let yaml = serde_yaml::from_str("reasoning:\n  dialect: vllm").unwrap();
-diff --git a/apis/src/openai/responses/store/config.rs b/apis/src/openai/responses/store/config.rs
-index 74f76af2..a643ac82 100644
---- a/apis/src/openai/responses/store/config.rs
-+++ b/apis/src/openai/responses/store/config.rs
-@@ -8,6 +8,7 @@ use praxis_filter::{FilterError, has_dot_dot_traversal};
- use secrecy::{ExposeSecret as _, SecretString};
- use serde::Deserialize;
- 
-+use super::background::{BackgroundConfig, validate_background};
- #[cfg(feature = "store-postgres")]
- use crate::store::{PgTlsConfig, postgres_url, validate_postgres_table_identifiers};
- use crate::store::{PoolConfig, SslMode, StoreCompressionConfig, validate_table_identifier};
-@@ -131,6 +132,11 @@ pub(crate) struct ResponseStoreConfig {
-     /// uncompressed records readable.
-     #[serde(default)]
-     pub compression: Option<StoreCompressionConfig>,
-+
-+    /// Run `background: true` Responses requests through an asynchronous
-+    /// inference processor. Without it they are rejected.
-+    #[serde(default)]
-+    pub background: Option<BackgroundConfig>,
- }
- 
- #[cfg(feature = "store-postgres")]
-@@ -151,6 +157,20 @@ impl ResponseStoreConfig {
- // Config Validation
- // -----------------------------------------------------------------------------
- 
-+/// Validate the pool, compression, and background sections when present.
-+fn validate_optional_sections(cfg: &ResponseStoreConfig) -> Result<(), FilterError> {
-+    if let Some(pool) = &cfg.pool {
-+        pool.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
-+    }
-+    if let Some(compression) = &cfg.compression {
-+        compression.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
-+    }
-+    if let Some(background) = &cfg.background {
-+        validate_background(background)?;
-+    }
-+    Ok(())
-+}
-+
- /// Validate the parsed configuration.
- pub(crate) fn validate_config(cfg: &ResponseStoreConfig) -> Result<(), FilterError> {
-     validate_backend_available(cfg.backend)?;
-@@ -165,12 +185,7 @@ pub(crate) fn validate_config(cfg: &ResponseStoreConfig) -> Result<(), FilterErr
-     if cfg.responses_table.eq_ignore_ascii_case(&cfg.conversations_table) {
-         return Err(format!("{FILTER_NAME}: response and conversation table names must be distinct").into());
-     }
--    if let Some(pool) = &cfg.pool {
--        pool.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
--    }
--    if let Some(compression) = &cfg.compression {
--        compression.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
--    }
-+    validate_optional_sections(cfg)?;
-     match cfg.backend {
-         StorageBackend::Sqlite => {
-             validate_sqlite_database_url(database_url)?;
-diff --git a/apis/src/openai/responses/store/filter.rs b/apis/src/openai/responses/store/filter.rs
-index 7dfcf8cc..335bc3e7 100644
---- a/apis/src/openai/responses/store/filter.rs
-+++ b/apis/src/openai/responses/store/filter.rs
-@@ -66,6 +66,7 @@ use super::{
-         state::ResponsesState,
-     },
-     InputItemPage, ListParams, MAX_PAGE_LIMIT, Order,
-+    background::Background,
-     config::{ResponseStoreConfig, StorageBackend, validate_config},
-     list_input_items,
- };
-@@ -100,6 +101,9 @@ pub struct ResponseStoreFilter {
-     /// Lazily initialized store backend. SQLite init failures are cached
-     /// as `None`; Postgres init failures are retried on every code path.
-     pub(crate) store: OnceCell<Option<Arc<dyn ResponseStore>>>,
-+
-+    /// Background responses, when configured.
-+    background: Option<Background>,
- }
- 
- impl ResponseStoreFilter {
-@@ -115,8 +119,9 @@ impl ResponseStoreFilter {
-     }
- 
-     /// Create a filter from validated config.
--    pub(super) fn new(config: ResponseStoreConfig) -> Self {
-+    pub(super) fn new(mut config: ResponseStoreConfig) -> Self {
-         Self {
-+            background: config.background.take().map(Background::new),
-             config,
-             store: OnceCell::new(),
-         }
-@@ -425,7 +430,7 @@ fn extract_request_input(body: &Option<Bytes>) -> Option<Value> {
- }
- 
- /// Build the stored conversation history from response input and output.
--fn assemble_stored_messages(input: Value, output: Option<&Value>) -> Value {
-+pub(super) fn assemble_stored_messages(input: Value, output: Option<&Value>) -> Value {
-     let mut messages = Vec::new();
- 
-     append_stored_input_items(&mut messages, input);
-@@ -853,6 +858,13 @@ impl HttpFilter for ResponseStoreFilter {
-             return Ok(FilterAction::Continue);
-         }
- 
-+        if ctx.request.method == http::Method::POST
-+            && let Some(background) = &self.background
-+            && let Some(id) = extract_cancel_id(ctx.request.uri.path())
-+        {
-+            return Ok(self.handle_cancel(ctx, background, id).await);
-+        }
-+
-         if let Err(action) = capture_persistence_owner(ctx) {
-             return Ok(action);
-         }
-@@ -882,6 +894,9 @@ impl HttpFilter for ResponseStoreFilter {
-         if !end_of_stream || ctx.request.method != http::Method::POST {
-             return Ok(FilterAction::Continue);
-         }
-+        if is_background_create(ctx) {
-+            return Ok(self.create_background(ctx, body.as_ref()).await);
-+        }
-         if let Err(action) = capture_persistence_owner(ctx) {
-             return Ok(action);
-         }
-@@ -979,6 +994,64 @@ impl HttpFilter for ResponseStoreFilter {
-     }
- }
- 
-+// -----------------------------------------------------------------------------
-+// Background Responses
-+// -----------------------------------------------------------------------------
-+
-+#[expect(
-+    clippy::multiple_inherent_impl,
-+    reason = "background responses are a distinct concern"
-+)]
-+impl ResponseStoreFilter {
-+    /// Serve a `background: true` create request.
-+    async fn create_background(&self, ctx: &HttpFilterContext<'_>, body: Option<&Bytes>) -> FilterAction {
-+        let Some(background) = &self.background else {
-+            return FilterAction::Reject(responses_error_rejection(
-+                400,
-+                "invalid_request_error",
-+                "background mode is not supported",
-+            ));
-+        };
-+        let owner = match require_state_owner(ctx) {
-+            Ok(owner) => owner,
-+            Err(action) => return action,
-+        };
-+        let Some(store) = self.ensure_store().await else {
-+            return FilterAction::Reject(reject_store_error());
-+        };
-+        let request: Value = match body.map(|b| serde_json::from_slice(b)) {
-+            Some(Ok(request)) => request,
-+            Some(Err(_)) | None => return FilterAction::Reject(reject_invalid_input("invalid JSON body")),
-+        };
-+        Box::pin(background.create(ctx, store.as_ref(), owner, &request)).await
-+    }
-+
-+    /// Serve `POST /v1/responses/{id}/cancel`.
-+    async fn handle_cancel(&self, ctx: &HttpFilterContext<'_>, background: &Background, id: &str) -> FilterAction {
-+        let record = match self.load_record(ctx, id).await {
-+            Ok(record) => record,
-+            Err(action) => return action,
-+        };
-+        let Some(store) = self.ensure_store().await else {
-+            return FilterAction::Reject(reject_store_error());
-+        };
-+        Box::pin(background.cancel(store.as_ref(), record, ctx.time_source.now().as_secs())).await
-+    }
-+}
-+
-+/// Whether the request creates a background response.
-+fn is_background_create(ctx: &HttpFilterContext<'_>) -> bool {
-+    ctx.get_metadata("openai_responses_format.background") == Some("true")
-+        && is_responses_create(&ctx.request.method, ctx.request.uri.path())
-+}
-+
-+/// Extract the response ID from a `/v1/responses/{id}/cancel` path.
-+pub(super) fn extract_cancel_id(path: &str) -> Option<&str> {
-+    let path = path.strip_suffix('/').unwrap_or(path);
-+    let id = path.strip_prefix("/v1/responses/")?.strip_suffix("/cancel")?;
-+    (!id.is_empty() && !id.contains('/')).then_some(id)
-+}
-+
- // -----------------------------------------------------------------------------
- // GET Retrieval
- // -----------------------------------------------------------------------------
-@@ -1039,6 +1112,12 @@ impl ResponseStoreFilter {
- 
-         match store.get_response(owner, id).await {
-             Ok(Some(record)) => {
-+                let record = match &self.background {
-+                    Some(background) => {
-+                        Box::pin(background.refresh(store.as_ref(), record, ctx.time_source.now().as_secs())).await
-+                    },
-+                    None => record,
-+                };
-                 let body = serde_json::to_vec(&record.response_object).unwrap_or_default();
-                 FilterAction::Reject(
-                     Rejection::status(200)
-diff --git a/apis/src/openai/responses/store/mod.rs b/apis/src/openai/responses/store/mod.rs
-index 83cd7a44..73a28c48 100644
---- a/apis/src/openai/responses/store/mod.rs
-+++ b/apis/src/openai/responses/store/mod.rs
-@@ -9,6 +9,7 @@
- //!
- //! [`ResponseStore`]: crate::store::ResponseStore
- 
-+mod background;
- mod config;
- mod filter;
- mod input_items;
-diff --git a/apis/src/openai/responses/tests.rs b/apis/src/openai/responses/tests.rs
-index d0257f26..ca3aa99f 100644
---- a/apis/src/openai/responses/tests.rs
-+++ b/apis/src/openai/responses/tests.rs
-@@ -953,6 +953,21 @@ async fn background_true_is_rejected_even_when_invalid_formats_continue() {
-     assert_eq!(body["error"]["message"], "background mode is not supported");
- }
- 
-+#[tokio::test]
-+async fn background_true_continues_to_the_store_when_configured() {
-+    let ctx = run_filter("background: continue", r#"{"input":"test","background":true}"#).await;
-+    assert_eq!(
-+        ctx.get_metadata("openai_responses_format.background"),
-+        Some("true"),
-+        "the response store reads the background flag"
-+    );
-+    assert!(
-+        serde_yaml::from_str::<serde_yaml::Value>("background: sometimes")
-+            .map(|config| ResponsesFormatFilter::from_config(&config).is_err())
-+            .unwrap()
-+    );
-+}
-+
- #[tokio::test]
- async fn mode_stateful_when_conversation_present() {
-     let ctx = run_filter("{}", r#"{"input":"test","store":false,"conversation":{"id":"conv_1"}}"#).await;
-diff --git a/apis/src/openai/translation/chat_completions.rs b/apis/src/openai/translation/chat_completions.rs
-index 16f40910..1ce440d9 100644
---- a/apis/src/openai/translation/chat_completions.rs
-+++ b/apis/src/openai/translation/chat_completions.rs
-@@ -349,6 +349,33 @@ struct RequestOverrides<'a> {
- // Request Translation
- // -----------------------------------------------------------------------------
- 
-+/// How a translating filter handles `truncation: "auto"`, which Chat
-+/// Completions cannot represent.
-+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-+#[serde(rename_all = "snake_case")]
-+pub(crate) enum TruncationAuto {
-+    /// Reject the request.
-+    #[default]
-+    Reject,
-+    /// Run it as `truncation: "disabled"`: a context that fits the model is
-+    /// unaffected, and one that does not fails instead of being truncated.
-+    /// The response reports `disabled`.
-+    Disabled,
-+}
-+
-+impl TruncationAuto {
-+    /// Rewrite `truncation: "auto"` in a Responses `request` as this handling
-+    /// says, before translation.
-+    pub(crate) fn apply(self, request: &mut Value) {
-+        if self == Self::Disabled
-+            && request.get("truncation").and_then(Value::as_str) == Some("auto")
-+            && let Some(fields) = request.as_object_mut()
-+        {
-+            fields.insert("truncation".to_owned(), Value::String(DEFAULT_TRUNCATION.to_owned()));
-+        }
-+    }
-+}
-+
- /// Convert an `OpenAI` `Responses` create request into a Chat Completions request.
- pub(crate) fn responses_request_to_chat_request(
-     request: &Value,
-diff --git a/apis/src/openai/translation/mod.rs b/apis/src/openai/translation/mod.rs
-index ddca740a..e4b61673 100644
---- a/apis/src/openai/translation/mod.rs
-+++ b/apis/src/openai/translation/mod.rs
-@@ -2234,6 +2234,7 @@ mod tests {
-         let options = ReasoningOptions {
-             dialect: super::reasoning::ReasoningDialect::Vllm,
-             max_reasoning_bytes: 16,
-+            summary: super::reasoning::SummaryHandling::Reject,
-         };
-         // Each item is 10 bytes and passes its own check, but concatenating them
-         // (with the newline separator) exceeds the ceiling.
-@@ -2308,6 +2309,7 @@ mod tests {
-         let options = ReasoningOptions {
-             dialect: super::reasoning::ReasoningDialect::Vllm,
-             max_reasoning_bytes: 16,
-+            summary: super::reasoning::SummaryHandling::Reject,
-         };
-         // Two 10-byte items straddling a function call each pass individually, but
-         // their combined size on the shared tool-call turn exceeds the ceiling.
-@@ -2376,6 +2378,7 @@ mod tests {
-         let options = ReasoningOptions {
-             dialect: super::reasoning::ReasoningDialect::Vllm,
-             max_reasoning_bytes: 4,
-+            summary: super::reasoning::SummaryHandling::Reject,
-         };
-         let error = super::chat_completions::responses_request_to_chat_request(
-             &json!({
-@@ -2758,6 +2761,7 @@ mod tests {
-         let options = ReasoningOptions {
-             dialect: super::reasoning::ReasoningDialect::Vllm,
-             max_reasoning_bytes: 4,
-+            summary: super::reasoning::SummaryHandling::Reject,
-         };
-         let context = super::chat_completions::ResponseContext::from_responses_request(&request, "abc".to_owned(), 0)
-             .with_completed_at(1)
-diff --git a/apis/src/openai/translation/reasoning.rs b/apis/src/openai/translation/reasoning.rs
-index cb0f63d5..6261d7e8 100644
---- a/apis/src/openai/translation/reasoning.rs
-+++ b/apis/src/openai/translation/reasoning.rs
-@@ -43,6 +43,17 @@ impl ReasoningDialect {
-     }
- }
- 
-+/// How a dialect without safe summaries handles a requested reasoning summary.
-+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-+#[serde(rename_all = "snake_case")]
-+pub(crate) enum SummaryHandling {
-+    /// Reject the request.
-+    #[default]
-+    Reject,
-+    /// Run the request and return reasoning items without a summary.
-+    Omit,
-+}
-+
- /// Resolved backend-specific reasoning configuration.
- #[derive(Clone, Debug, Deserialize)]
- #[serde(deny_unknown_fields, default)]
-@@ -51,6 +62,8 @@ pub(crate) struct ReasoningOptions {
-     pub(crate) dialect: ReasoningDialect,
-     /// Maximum raw reasoning size preserved per response.
-     pub(crate) max_reasoning_bytes: usize,
-+    /// Handling of a requested summary the dialect cannot produce.
-+    pub(crate) summary: SummaryHandling,
- }
- 
- impl Default for ReasoningOptions {
-@@ -58,6 +71,7 @@ impl Default for ReasoningOptions {
-         Self {
-             dialect: ReasoningDialect::None,
-             max_reasoning_bytes: DEFAULT_MAX_REASONING_BYTES,
-+            summary: SummaryHandling::Reject,
-         }
-     }
- }
-@@ -155,7 +169,8 @@ fn summary_control<'a>(
- }
- 
- /// Validate that a requested reasoning summary is compatible with the dialect.
--/// A summary request against a dialect without a safe-summary contract is rejected.
-+/// A summary request against a dialect without a safe-summary contract is
-+/// rejected unless the options say to omit the summary.
- pub(crate) fn validate_requested_reasoning(
-     request: &Map<String, Value>,
-     options: &ReasoningOptions,
-@@ -170,7 +185,10 @@ pub(crate) fn validate_requested_reasoning(
-         },
-     };
- 
--    if requested_summary(reasoning)?.is_some() && !options.dialect.supports_safe_summary() {
-+    if requested_summary(reasoning)?.is_some()
-+        && !options.dialect.supports_safe_summary()
-+        && options.summary == SummaryHandling::Reject
-+    {
-         return Err(TranslationError::UnsupportedReasoningSummary);
-     }
- 
-@@ -304,7 +322,7 @@ fn resolve_vllm_reasoning(message: &Map<String, Value>) -> Result<Option<&str>,
- }
- 
- /// Build a schema-complete `Responses` reasoning item carrying raw reasoning.
--fn reasoning_item(id: String, status: &str, text: &str) -> Value {
-+pub(crate) fn reasoning_item(id: String, status: &str, text: &str) -> Value {
-     json!({
-         "id": Value::String(id),
-         "type": "reasoning",
-diff --git a/docs/filters/openai_response_store.md b/docs/filters/openai_response_store.md
-index 8e61567b..f93648fe 100644
---- a/docs/filters/openai_response_store.md
-+++ b/docs/filters/openai_response_store.md
-@@ -21,6 +21,15 @@ Persists Responses API responses to the configured response store backend.
- | `allow_private_database_url` | bool | no | Allow `PostgreSQL` URLs that target local-sensitive addresses. By default, DNS names, localhost, loopback, private, link-local, cloud metadata, unspecified, and Unix socket targets are rejected. This opt-in is intended for local development and tests. |
- | `pool` | PoolConfig | no | Connection pool tuning options. When omitted, sqlx defaults apply (`max_connections = 10`, `idle_timeout = 600s`, `acquire_timeout = 30s`). |
- | `compression` | StoreCompressionConfig | no | Optional payload compression for stored JSON columns. When omitted, payloads are stored uncompressed. Reads auto-detect the format, so enabling compression keeps existing uncompressed records readable. |
-+| `background` | BackgroundConfig | no | Run `background: true` Responses requests through an asynchronous inference processor. Without it they are rejected. |
-+| `background.processor_url` | string | yes | Base URL of the processor API, for example `http://llm-d-async:8080`. |
-+| `background.queue` | string | no | Processor queue for background requests. Defaults to the processor's first queue. |
-+| `background.objective` | string | no | Inference objective for background requests, sent to the inference gateway as `x-llm-d-inference-objective`. |
-+| `background.deadline_secs` | integer | no | Seconds a background response may take before it fails. |
-+| `background.timeout_ms` | integer | no | Timeout of one processor call, in milliseconds. |
-+| `background.allow_private_processor_url` | bool | no | Allow a processor URL on a private, loopback, or link-local address. |
-+| `background.reasoning` | ReasoningOptions | no | Reasoning dialect of the Chat Completions backend behind the processor. |
-+| `background.truncation_auto` | TruncationAuto | no | Handling of `truncation: "auto"`. |
- 
- ## Example
- 
-diff --git a/docs/filters/openai_responses_format.md b/docs/filters/openai_responses_format.md
-index 4c5e6942..b028ff8d 100644
---- a/docs/filters/openai_responses_format.md
-+++ b/docs/filters/openai_responses_format.md
-@@ -29,6 +29,7 @@ Use with branch chains to route stateful and stateless requests to different clu
- | `headers.model` | string | no | Header name for the extracted model value. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-model` remains allowed. Must not overwrite other classification facts such as `x-praxis-ai-format`. |
- | `headers.stream` | string | no | Header name for the extracted stream flag. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-stream` remains allowed. |
- | `headers.mode` | string | no | Header name for the computed mode (`stateless` or `stateful`). Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-responses-mode` remains allowed. |
-+| `background` | `reject` \| `continue` | no | Handling of Responses create requests with `background: true`. |
- 
- ## Examples
- 
-diff --git a/docs/filters/openai_responses_request.md b/docs/filters/openai_responses_request.md
-index 3c8216d2..4452644d 100644
---- a/docs/filters/openai_responses_request.md
-+++ b/docs/filters/openai_responses_request.md
-@@ -25,6 +25,7 @@ Promotes `openai_responses_format.*` metadata and filter results, and generates
- | `headers.model` | string | no | Header name for the extracted model value. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-model` remains allowed. Must not overwrite other classification facts such as `x-praxis-ai-format`. |
- | `headers.stream` | string | no | Header name for the extracted stream flag. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-stream` remains allowed. |
- | `headers.mode` | string | no | Header name for the computed mode (`stateless` or `stateful`). Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-responses-mode` remains allowed. |
-+| `background` | `reject` \| `continue` | no | Handling of Responses create requests with `background: true`. |
- 
- ## Example
- 
-diff --git a/docs/filters/responses_to_chat_completions.md b/docs/filters/responses_to_chat_completions.md
-index 44586a35..d25a1732 100644
---- a/docs/filters/responses_to_chat_completions.md
-+++ b/docs/filters/responses_to_chat_completions.md
-@@ -13,7 +13,7 @@ Configure `path_rewrite` after this filter when the upstream endpoint must chang
- 
- Requests using `previous_response_id` require `openai_response_store` and `openai_responses_rehydrate` earlier in the request pipeline. The filter fails closed if stored history has not been resolved, preventing a continuation from silently losing prior turns. For finite web-search loops, place `openai_web_search` and `openai_agentic_loop` before this filter in an iterative-router step. The reverse response order then restores the hosted call before those filters inspect it.
- 
--The optional `reasoning` block selects a dialect that promotes raw chain-of-thought returned by the backend into a Responses `reasoning` output item. The default dialect `none` performs no extraction and preserves only portable Chat Completions fields. The `vllm` dialect reads the current `message.reasoning` field (falling back to the deprecated `message.reasoning_content` alias) and emits it as a reasoning item whose `content` is `reasoning_text`. Raw reasoning is never placed in the item summary, which is reserved for safe summaries. No current dialect can generate a safe summary, so a client that requests `reasoning.summary` (or the deprecated `reasoning.generate_summary`) is rejected. Streaming reasoning translation is not yet implemented, so a streaming request is rejected when valid reasoning dialect is configured. On continuation, raw reasoning is replayed into the following assistant turn's `reasoning` field, preserving its ordinary `content`. Reasoning-only output becomes a standalone assistant message at a turn boundary or end of input. Reasoning input requires an enabled dialect and non-empty raw `reasoning_text` content; encrypted, summary-only, and malformed items are rejected before forwarding.
-+The optional `reasoning` block selects a dialect that promotes raw chain-of-thought returned by the backend into a Responses `reasoning` output item. The default dialect `none` performs no extraction and preserves only portable Chat Completions fields. The `vllm` dialect reads the current `message.reasoning` field (falling back to the deprecated `message.reasoning_content` alias) and emits it as a reasoning item whose `content` is `reasoning_text`. Raw reasoning is never placed in the item summary, which is reserved for safe summaries. No current dialect can generate a safe summary, so a client that requests `reasoning.summary` (or the deprecated `reasoning.generate_summary`) is rejected, unless `reasoning.summary` is `omit`, which runs the request and returns reasoning without a summary. A streaming response carries the reasoning item first, as `response.reasoning_text.delta` events; reasoning that arrives after message or tool-call output began fails the stream. `truncation_auto: disabled` runs `truncation: "auto"` untruncated and reports `disabled`, where the default rejects it. On continuation, raw reasoning is replayed into the following assistant turn's `reasoning` field, preserving its ordinary `content`. Reasoning-only output becomes a standalone assistant message at a turn boundary or end of input. Reasoning input requires an enabled dialect and non-empty raw `reasoning_text` content; encrypted, summary-only, and malformed items are rejected before forwarding.
- 
- To emit translated SSE events incrementally, this filter forces the reconciled response body mode to `Stream` for the entire filter chain. The protocol layer reconciles a single chain-wide response body mode with no per-filter provenance, so this downgrade cannot be scoped to one neighbor: it overrides every response filter's `StreamBuffer` requirement, not only `openai_response_store`'s. Only compose response-body filters after this one that tolerate incremental fragments; `openai_stream_events` and `openai_response_store` are compatible because they persist streamed turns from the accumulator, not a buffered body, whereas any other response-body rewriter needing the complete buffered body would instead receive fragments.
- 
-diff --git a/examples/README.md b/examples/README.md
-index 1bbdf36e..bc0892a0 100644
---- a/examples/README.md
-+++ b/examples/README.md
-@@ -91,6 +91,7 @@ before sending requests.
- | [agentic-loop-deferred-mcp-fixture.yaml](configs/openai/responses/agentic-loop-deferred-mcp-fixture.yaml) | Minimal agentic-loop pipeline that sanitizes deferred MCP connectors on the first inference round. `defer_loading: true` skips `tools/list`, so replay never opens an independent MCP callout |
- | [agentic-loop-fixture.yaml](configs/openai/responses/agentic-loop-fixture.yaml) | Minimal agentic loop pipeline for inference fixture replay |
- | [agentic-loop.yaml](configs/openai/responses/agentic-loop.yaml) | Demonstrates the openai_agentic_loop filter with iterative_request_router for step-based model-tool-model looping in the Responses API |
-+| [background-llm-d-async.yaml](configs/openai/responses/background-llm-d-async.yaml) | llm-d-async (https://github.com/wseaton/llm-d-async-rs) is an asynchronous inference processor: requests wait in durable, deadline-ordered queues, are retried and shed under flow control, and interrupted vLLM generations resume from their saved tokens |
- | [body-size-limits.yaml](configs/openai/responses/body-size-limits.yaml) | Demonstrates how raw request body size is enforced across a chain of OpenAI Responses filters that each buffer the request body |
- | [client-tool-compat-chat-completions.yaml](configs/openai/responses/client-tool-compat-chat-completions.yaml) | Lets a rich Codex-style Responses client (POST /v1/responses with custom, namespace, local shell, and client-executed tool_search tools) reach a function-only Chat Completions backend (POST /v1/chat/completions) by composing openai_client_tool_compat with responses_to_chat_completions in one iterative-router step (GitHub issue #1206) |
- | [client-tool-compat.yaml](configs/openai/responses/client-tool-compat.yaml) | Lets a rich Codex-style Responses client talk to a function-only Responses backend (for example vLLM at POST /v1/responses) without routing through /v1/chat/completions and without executing client-owned tools in Praxis |
-diff --git a/tests/integration/tests/suite/examples/mod.rs b/tests/integration/tests/suite/examples/mod.rs
-index 07da5630..5e39c91c 100644
---- a/tests/integration/tests/suite/examples/mod.rs
-+++ b/tests/integration/tests/suite/examples/mod.rs
-@@ -19,6 +19,8 @@ mod aws_sigv4;
- mod azure_ad;
- mod azure_translation;
- #[cfg(feature = "store-sqlite")]
-+mod background_llm_d_async;
-+#[cfg(feature = "store-sqlite")]
- mod client_tool_compat_chat_completions;
- #[cfg(feature = "store-sqlite")]
- mod compact;
 diff --git a/apis/src/openai/responses/store/background/mod.rs b/apis/src/openai/responses/store/background/mod.rs
 new file mode 100644
 index 00000000..6a6290d9
@@ -2453,26 +1986,478 @@ index 00000000..e92454b1
 +    set_status(&mut previous.response_object, "in_progress");
 +    assert_eq!(rejected(background.prepare(&ctx, &body, Some(previous))), 400);
 +}
+diff --git a/apis/src/openai/responses/store/config.rs b/apis/src/openai/responses/store/config.rs
+index 74f76af2..a643ac82 100644
+--- a/apis/src/openai/responses/store/config.rs
++++ b/apis/src/openai/responses/store/config.rs
+@@ -8,6 +8,7 @@ use praxis_filter::{FilterError, has_dot_dot_traversal};
+ use secrecy::{ExposeSecret as _, SecretString};
+ use serde::Deserialize;
+ 
++use super::background::{BackgroundConfig, validate_background};
+ #[cfg(feature = "store-postgres")]
+ use crate::store::{PgTlsConfig, postgres_url, validate_postgres_table_identifiers};
+ use crate::store::{PoolConfig, SslMode, StoreCompressionConfig, validate_table_identifier};
+@@ -131,6 +132,11 @@ pub(crate) struct ResponseStoreConfig {
+     /// uncompressed records readable.
+     #[serde(default)]
+     pub compression: Option<StoreCompressionConfig>,
++
++    /// Run `background: true` Responses requests through an asynchronous
++    /// inference processor. Without it they are rejected.
++    #[serde(default)]
++    pub background: Option<BackgroundConfig>,
+ }
+ 
+ #[cfg(feature = "store-postgres")]
+@@ -151,6 +157,20 @@ impl ResponseStoreConfig {
+ // Config Validation
+ // -----------------------------------------------------------------------------
+ 
++/// Validate the pool, compression, and background sections when present.
++fn validate_optional_sections(cfg: &ResponseStoreConfig) -> Result<(), FilterError> {
++    if let Some(pool) = &cfg.pool {
++        pool.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
++    }
++    if let Some(compression) = &cfg.compression {
++        compression.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
++    }
++    if let Some(background) = &cfg.background {
++        validate_background(background)?;
++    }
++    Ok(())
++}
++
+ /// Validate the parsed configuration.
+ pub(crate) fn validate_config(cfg: &ResponseStoreConfig) -> Result<(), FilterError> {
+     validate_backend_available(cfg.backend)?;
+@@ -165,12 +185,7 @@ pub(crate) fn validate_config(cfg: &ResponseStoreConfig) -> Result<(), FilterErr
+     if cfg.responses_table.eq_ignore_ascii_case(&cfg.conversations_table) {
+         return Err(format!("{FILTER_NAME}: response and conversation table names must be distinct").into());
+     }
+-    if let Some(pool) = &cfg.pool {
+-        pool.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
+-    }
+-    if let Some(compression) = &cfg.compression {
+-        compression.validate().map_err(|e| format!("{FILTER_NAME}: {e}"))?;
+-    }
++    validate_optional_sections(cfg)?;
+     match cfg.backend {
+         StorageBackend::Sqlite => {
+             validate_sqlite_database_url(database_url)?;
+diff --git a/apis/src/openai/responses/store/filter.rs b/apis/src/openai/responses/store/filter.rs
+index 7dfcf8cc..335bc3e7 100644
+--- a/apis/src/openai/responses/store/filter.rs
++++ b/apis/src/openai/responses/store/filter.rs
+@@ -66,6 +66,7 @@ use super::{
+         state::ResponsesState,
+     },
+     InputItemPage, ListParams, MAX_PAGE_LIMIT, Order,
++    background::Background,
+     config::{ResponseStoreConfig, StorageBackend, validate_config},
+     list_input_items,
+ };
+@@ -100,6 +101,9 @@ pub struct ResponseStoreFilter {
+     /// Lazily initialized store backend. SQLite init failures are cached
+     /// as `None`; Postgres init failures are retried on every code path.
+     pub(crate) store: OnceCell<Option<Arc<dyn ResponseStore>>>,
++
++    /// Background responses, when configured.
++    background: Option<Background>,
+ }
+ 
+ impl ResponseStoreFilter {
+@@ -115,8 +119,9 @@ impl ResponseStoreFilter {
+     }
+ 
+     /// Create a filter from validated config.
+-    pub(super) fn new(config: ResponseStoreConfig) -> Self {
++    pub(super) fn new(mut config: ResponseStoreConfig) -> Self {
+         Self {
++            background: config.background.take().map(Background::new),
+             config,
+             store: OnceCell::new(),
+         }
+@@ -425,7 +430,7 @@ fn extract_request_input(body: &Option<Bytes>) -> Option<Value> {
+ }
+ 
+ /// Build the stored conversation history from response input and output.
+-fn assemble_stored_messages(input: Value, output: Option<&Value>) -> Value {
++pub(super) fn assemble_stored_messages(input: Value, output: Option<&Value>) -> Value {
+     let mut messages = Vec::new();
+ 
+     append_stored_input_items(&mut messages, input);
+@@ -853,6 +858,13 @@ impl HttpFilter for ResponseStoreFilter {
+             return Ok(FilterAction::Continue);
+         }
+ 
++        if ctx.request.method == http::Method::POST
++            && let Some(background) = &self.background
++            && let Some(id) = extract_cancel_id(ctx.request.uri.path())
++        {
++            return Ok(self.handle_cancel(ctx, background, id).await);
++        }
++
+         if let Err(action) = capture_persistence_owner(ctx) {
+             return Ok(action);
+         }
+@@ -882,6 +894,9 @@ impl HttpFilter for ResponseStoreFilter {
+         if !end_of_stream || ctx.request.method != http::Method::POST {
+             return Ok(FilterAction::Continue);
+         }
++        if is_background_create(ctx) {
++            return Ok(self.create_background(ctx, body.as_ref()).await);
++        }
+         if let Err(action) = capture_persistence_owner(ctx) {
+             return Ok(action);
+         }
+@@ -979,6 +994,64 @@ impl HttpFilter for ResponseStoreFilter {
+     }
+ }
+ 
++// -----------------------------------------------------------------------------
++// Background Responses
++// -----------------------------------------------------------------------------
++
++#[expect(
++    clippy::multiple_inherent_impl,
++    reason = "background responses are a distinct concern"
++)]
++impl ResponseStoreFilter {
++    /// Serve a `background: true` create request.
++    async fn create_background(&self, ctx: &HttpFilterContext<'_>, body: Option<&Bytes>) -> FilterAction {
++        let Some(background) = &self.background else {
++            return FilterAction::Reject(responses_error_rejection(
++                400,
++                "invalid_request_error",
++                "background mode is not supported",
++            ));
++        };
++        let owner = match require_state_owner(ctx) {
++            Ok(owner) => owner,
++            Err(action) => return action,
++        };
++        let Some(store) = self.ensure_store().await else {
++            return FilterAction::Reject(reject_store_error());
++        };
++        let request: Value = match body.map(|b| serde_json::from_slice(b)) {
++            Some(Ok(request)) => request,
++            Some(Err(_)) | None => return FilterAction::Reject(reject_invalid_input("invalid JSON body")),
++        };
++        Box::pin(background.create(ctx, store.as_ref(), owner, &request)).await
++    }
++
++    /// Serve `POST /v1/responses/{id}/cancel`.
++    async fn handle_cancel(&self, ctx: &HttpFilterContext<'_>, background: &Background, id: &str) -> FilterAction {
++        let record = match self.load_record(ctx, id).await {
++            Ok(record) => record,
++            Err(action) => return action,
++        };
++        let Some(store) = self.ensure_store().await else {
++            return FilterAction::Reject(reject_store_error());
++        };
++        Box::pin(background.cancel(store.as_ref(), record, ctx.time_source.now().as_secs())).await
++    }
++}
++
++/// Whether the request creates a background response.
++fn is_background_create(ctx: &HttpFilterContext<'_>) -> bool {
++    ctx.get_metadata("openai_responses_format.background") == Some("true")
++        && is_responses_create(&ctx.request.method, ctx.request.uri.path())
++}
++
++/// Extract the response ID from a `/v1/responses/{id}/cancel` path.
++pub(super) fn extract_cancel_id(path: &str) -> Option<&str> {
++    let path = path.strip_suffix('/').unwrap_or(path);
++    let id = path.strip_prefix("/v1/responses/")?.strip_suffix("/cancel")?;
++    (!id.is_empty() && !id.contains('/')).then_some(id)
++}
++
+ // -----------------------------------------------------------------------------
+ // GET Retrieval
+ // -----------------------------------------------------------------------------
+@@ -1039,6 +1112,12 @@ impl ResponseStoreFilter {
+ 
+         match store.get_response(owner, id).await {
+             Ok(Some(record)) => {
++                let record = match &self.background {
++                    Some(background) => {
++                        Box::pin(background.refresh(store.as_ref(), record, ctx.time_source.now().as_secs())).await
++                    },
++                    None => record,
++                };
+                 let body = serde_json::to_vec(&record.response_object).unwrap_or_default();
+                 FilterAction::Reject(
+                     Rejection::status(200)
+diff --git a/apis/src/openai/responses/store/mod.rs b/apis/src/openai/responses/store/mod.rs
+index 83cd7a44..73a28c48 100644
+--- a/apis/src/openai/responses/store/mod.rs
++++ b/apis/src/openai/responses/store/mod.rs
+@@ -9,6 +9,7 @@
+ //!
+ //! [`ResponseStore`]: crate::store::ResponseStore
+ 
++mod background;
+ mod config;
+ mod filter;
+ mod input_items;
+diff --git a/apis/src/openai/responses/tests.rs b/apis/src/openai/responses/tests.rs
+index d0257f26..ca3aa99f 100644
+--- a/apis/src/openai/responses/tests.rs
++++ b/apis/src/openai/responses/tests.rs
+@@ -953,6 +953,21 @@ async fn background_true_is_rejected_even_when_invalid_formats_continue() {
+     assert_eq!(body["error"]["message"], "background mode is not supported");
+ }
+ 
++#[tokio::test]
++async fn background_true_continues_to_the_store_when_configured() {
++    let ctx = run_filter("background: continue", r#"{"input":"test","background":true}"#).await;
++    assert_eq!(
++        ctx.get_metadata("openai_responses_format.background"),
++        Some("true"),
++        "the response store reads the background flag"
++    );
++    assert!(
++        serde_yaml::from_str::<serde_yaml::Value>("background: sometimes")
++            .map(|config| ResponsesFormatFilter::from_config(&config).is_err())
++            .unwrap()
++    );
++}
++
+ #[tokio::test]
+ async fn mode_stateful_when_conversation_present() {
+     let ctx = run_filter("{}", r#"{"input":"test","store":false,"conversation":{"id":"conv_1"}}"#).await;
+diff --git a/apis/src/openai/translation/chat_completions.rs b/apis/src/openai/translation/chat_completions.rs
+index 16f40910..1ce440d9 100644
+--- a/apis/src/openai/translation/chat_completions.rs
++++ b/apis/src/openai/translation/chat_completions.rs
+@@ -349,6 +349,33 @@ struct RequestOverrides<'a> {
+ // Request Translation
+ // -----------------------------------------------------------------------------
+ 
++/// How a translating filter handles `truncation: "auto"`, which Chat
++/// Completions cannot represent.
++#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum TruncationAuto {
++    /// Reject the request.
++    #[default]
++    Reject,
++    /// Run it as `truncation: "disabled"`: a context that fits the model is
++    /// unaffected, and one that does not fails instead of being truncated.
++    /// The response reports `disabled`.
++    Disabled,
++}
++
++impl TruncationAuto {
++    /// Rewrite `truncation: "auto"` in a Responses `request` as this handling
++    /// says, before translation.
++    pub(crate) fn apply(self, request: &mut Value) {
++        if self == Self::Disabled
++            && request.get("truncation").and_then(Value::as_str) == Some("auto")
++            && let Some(fields) = request.as_object_mut()
++        {
++            fields.insert("truncation".to_owned(), Value::String(DEFAULT_TRUNCATION.to_owned()));
++        }
++    }
++}
++
+ /// Convert an `OpenAI` `Responses` create request into a Chat Completions request.
+ pub(crate) fn responses_request_to_chat_request(
+     request: &Value,
+diff --git a/apis/src/openai/translation/mod.rs b/apis/src/openai/translation/mod.rs
+index ddca740a..e4b61673 100644
+--- a/apis/src/openai/translation/mod.rs
++++ b/apis/src/openai/translation/mod.rs
+@@ -2234,6 +2234,7 @@ mod tests {
+         let options = ReasoningOptions {
+             dialect: super::reasoning::ReasoningDialect::Vllm,
+             max_reasoning_bytes: 16,
++            summary: super::reasoning::SummaryHandling::Reject,
+         };
+         // Each item is 10 bytes and passes its own check, but concatenating them
+         // (with the newline separator) exceeds the ceiling.
+@@ -2308,6 +2309,7 @@ mod tests {
+         let options = ReasoningOptions {
+             dialect: super::reasoning::ReasoningDialect::Vllm,
+             max_reasoning_bytes: 16,
++            summary: super::reasoning::SummaryHandling::Reject,
+         };
+         // Two 10-byte items straddling a function call each pass individually, but
+         // their combined size on the shared tool-call turn exceeds the ceiling.
+@@ -2376,6 +2378,7 @@ mod tests {
+         let options = ReasoningOptions {
+             dialect: super::reasoning::ReasoningDialect::Vllm,
+             max_reasoning_bytes: 4,
++            summary: super::reasoning::SummaryHandling::Reject,
+         };
+         let error = super::chat_completions::responses_request_to_chat_request(
+             &json!({
+@@ -2758,6 +2761,7 @@ mod tests {
+         let options = ReasoningOptions {
+             dialect: super::reasoning::ReasoningDialect::Vllm,
+             max_reasoning_bytes: 4,
++            summary: super::reasoning::SummaryHandling::Reject,
+         };
+         let context = super::chat_completions::ResponseContext::from_responses_request(&request, "abc".to_owned(), 0)
+             .with_completed_at(1)
+diff --git a/apis/src/openai/translation/reasoning.rs b/apis/src/openai/translation/reasoning.rs
+index cb0f63d5..6261d7e8 100644
+--- a/apis/src/openai/translation/reasoning.rs
++++ b/apis/src/openai/translation/reasoning.rs
+@@ -43,6 +43,17 @@ impl ReasoningDialect {
+     }
+ }
+ 
++/// How a dialect without safe summaries handles a requested reasoning summary.
++#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum SummaryHandling {
++    /// Reject the request.
++    #[default]
++    Reject,
++    /// Run the request and return reasoning items without a summary.
++    Omit,
++}
++
+ /// Resolved backend-specific reasoning configuration.
+ #[derive(Clone, Debug, Deserialize)]
+ #[serde(deny_unknown_fields, default)]
+@@ -51,6 +62,8 @@ pub(crate) struct ReasoningOptions {
+     pub(crate) dialect: ReasoningDialect,
+     /// Maximum raw reasoning size preserved per response.
+     pub(crate) max_reasoning_bytes: usize,
++    /// Handling of a requested summary the dialect cannot produce.
++    pub(crate) summary: SummaryHandling,
+ }
+ 
+ impl Default for ReasoningOptions {
+@@ -58,6 +71,7 @@ impl Default for ReasoningOptions {
+         Self {
+             dialect: ReasoningDialect::None,
+             max_reasoning_bytes: DEFAULT_MAX_REASONING_BYTES,
++            summary: SummaryHandling::Reject,
+         }
+     }
+ }
+@@ -155,7 +169,8 @@ fn summary_control<'a>(
+ }
+ 
+ /// Validate that a requested reasoning summary is compatible with the dialect.
+-/// A summary request against a dialect without a safe-summary contract is rejected.
++/// A summary request against a dialect without a safe-summary contract is
++/// rejected unless the options say to omit the summary.
+ pub(crate) fn validate_requested_reasoning(
+     request: &Map<String, Value>,
+     options: &ReasoningOptions,
+@@ -170,7 +185,10 @@ pub(crate) fn validate_requested_reasoning(
+         },
+     };
+ 
+-    if requested_summary(reasoning)?.is_some() && !options.dialect.supports_safe_summary() {
++    if requested_summary(reasoning)?.is_some()
++        && !options.dialect.supports_safe_summary()
++        && options.summary == SummaryHandling::Reject
++    {
+         return Err(TranslationError::UnsupportedReasoningSummary);
+     }
+ 
+@@ -304,7 +322,7 @@ fn resolve_vllm_reasoning(message: &Map<String, Value>) -> Result<Option<&str>,
+ }
+ 
+ /// Build a schema-complete `Responses` reasoning item carrying raw reasoning.
+-fn reasoning_item(id: String, status: &str, text: &str) -> Value {
++pub(crate) fn reasoning_item(id: String, status: &str, text: &str) -> Value {
+     json!({
+         "id": Value::String(id),
+         "type": "reasoning",
+diff --git a/docs/filters/openai_response_store.md b/docs/filters/openai_response_store.md
+index 8e61567b..f93648fe 100644
+--- a/docs/filters/openai_response_store.md
++++ b/docs/filters/openai_response_store.md
+@@ -21,6 +21,15 @@ Persists Responses API responses to the configured response store backend.
+ | `allow_private_database_url` | bool | no | Allow `PostgreSQL` URLs that target local-sensitive addresses. By default, DNS names, localhost, loopback, private, link-local, cloud metadata, unspecified, and Unix socket targets are rejected. This opt-in is intended for local development and tests. |
+ | `pool` | PoolConfig | no | Connection pool tuning options. When omitted, sqlx defaults apply (`max_connections = 10`, `idle_timeout = 600s`, `acquire_timeout = 30s`). |
+ | `compression` | StoreCompressionConfig | no | Optional payload compression for stored JSON columns. When omitted, payloads are stored uncompressed. Reads auto-detect the format, so enabling compression keeps existing uncompressed records readable. |
++| `background` | BackgroundConfig | no | Run `background: true` Responses requests through an asynchronous inference processor. Without it they are rejected. |
++| `background.processor_url` | string | yes | Base URL of the processor API, for example `http://llm-d-async:8080`. |
++| `background.queue` | string | no | Processor queue for background requests. Defaults to the processor's first queue. |
++| `background.objective` | string | no | Inference objective for background requests, sent to the inference gateway as `x-llm-d-inference-objective`. |
++| `background.deadline_secs` | integer | no | Seconds a background response may take before it fails. |
++| `background.timeout_ms` | integer | no | Timeout of one processor call, in milliseconds. |
++| `background.allow_private_processor_url` | bool | no | Allow a processor URL on a private, loopback, or link-local address. |
++| `background.reasoning` | ReasoningOptions | no | Reasoning dialect of the Chat Completions backend behind the processor. |
++| `background.truncation_auto` | TruncationAuto | no | Handling of `truncation: "auto"`. |
+ 
+ ## Example
+ 
+diff --git a/docs/filters/openai_responses_format.md b/docs/filters/openai_responses_format.md
+index 4c5e6942..b028ff8d 100644
+--- a/docs/filters/openai_responses_format.md
++++ b/docs/filters/openai_responses_format.md
+@@ -29,6 +29,7 @@ Use with branch chains to route stateful and stateless requests to different clu
+ | `headers.model` | string | no | Header name for the extracted model value. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-model` remains allowed. Must not overwrite other classification facts such as `x-praxis-ai-format`. |
+ | `headers.stream` | string | no | Header name for the extracted stream flag. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-stream` remains allowed. |
+ | `headers.mode` | string | no | Header name for the computed mode (`stateless` or `stateful`). Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-responses-mode` remains allowed. |
++| `background` | `reject` \| `continue` | no | Handling of Responses create requests with `background: true`. |
+ 
+ ## Examples
+ 
+diff --git a/docs/filters/openai_responses_request.md b/docs/filters/openai_responses_request.md
+index 3c8216d2..4452644d 100644
+--- a/docs/filters/openai_responses_request.md
++++ b/docs/filters/openai_responses_request.md
+@@ -25,6 +25,7 @@ Promotes `openai_responses_format.*` metadata and filter results, and generates
+ | `headers.model` | string | no | Header name for the extracted model value. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-model` remains allowed. Must not overwrite other classification facts such as `x-praxis-ai-format`. |
+ | `headers.stream` | string | no | Header name for the extracted stream flag. Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-ai-stream` remains allowed. |
+ | `headers.mode` | string | no | Header name for the computed mode (`stateless` or `stateful`). Must not be a hop-by-hop, framing, Host, credential, API-key, or other internal `x-praxis-*` header. Dedicated default `x-praxis-responses-mode` remains allowed. |
++| `background` | `reject` \| `continue` | no | Handling of Responses create requests with `background: true`. |
+ 
+ ## Example
+ 
+diff --git a/docs/filters/responses_to_chat_completions.md b/docs/filters/responses_to_chat_completions.md
+index 44586a35..d25a1732 100644
+--- a/docs/filters/responses_to_chat_completions.md
++++ b/docs/filters/responses_to_chat_completions.md
+@@ -13,7 +13,7 @@ Configure `path_rewrite` after this filter when the upstream endpoint must chang
+ 
+ Requests using `previous_response_id` require `openai_response_store` and `openai_responses_rehydrate` earlier in the request pipeline. The filter fails closed if stored history has not been resolved, preventing a continuation from silently losing prior turns. For finite web-search loops, place `openai_web_search` and `openai_agentic_loop` before this filter in an iterative-router step. The reverse response order then restores the hosted call before those filters inspect it.
+ 
+-The optional `reasoning` block selects a dialect that promotes raw chain-of-thought returned by the backend into a Responses `reasoning` output item. The default dialect `none` performs no extraction and preserves only portable Chat Completions fields. The `vllm` dialect reads the current `message.reasoning` field (falling back to the deprecated `message.reasoning_content` alias) and emits it as a reasoning item whose `content` is `reasoning_text`. Raw reasoning is never placed in the item summary, which is reserved for safe summaries. No current dialect can generate a safe summary, so a client that requests `reasoning.summary` (or the deprecated `reasoning.generate_summary`) is rejected. Streaming reasoning translation is not yet implemented, so a streaming request is rejected when valid reasoning dialect is configured. On continuation, raw reasoning is replayed into the following assistant turn's `reasoning` field, preserving its ordinary `content`. Reasoning-only output becomes a standalone assistant message at a turn boundary or end of input. Reasoning input requires an enabled dialect and non-empty raw `reasoning_text` content; encrypted, summary-only, and malformed items are rejected before forwarding.
++The optional `reasoning` block selects a dialect that promotes raw chain-of-thought returned by the backend into a Responses `reasoning` output item. The default dialect `none` performs no extraction and preserves only portable Chat Completions fields. The `vllm` dialect reads the current `message.reasoning` field (falling back to the deprecated `message.reasoning_content` alias) and emits it as a reasoning item whose `content` is `reasoning_text`. Raw reasoning is never placed in the item summary, which is reserved for safe summaries. No current dialect can generate a safe summary, so a client that requests `reasoning.summary` (or the deprecated `reasoning.generate_summary`) is rejected, unless `reasoning.summary` is `omit`, which runs the request and returns reasoning without a summary. A streaming response carries the reasoning item first, as `response.reasoning_text.delta` events; reasoning that arrives after message or tool-call output began fails the stream. `truncation_auto: disabled` runs `truncation: "auto"` untruncated and reports `disabled`, where the default rejects it. On continuation, raw reasoning is replayed into the following assistant turn's `reasoning` field, preserving its ordinary `content`. Reasoning-only output becomes a standalone assistant message at a turn boundary or end of input. Reasoning input requires an enabled dialect and non-empty raw `reasoning_text` content; encrypted, summary-only, and malformed items are rejected before forwarding.
+ 
+ To emit translated SSE events incrementally, this filter forces the reconciled response body mode to `Stream` for the entire filter chain. The protocol layer reconciles a single chain-wide response body mode with no per-filter provenance, so this downgrade cannot be scoped to one neighbor: it overrides every response filter's `StreamBuffer` requirement, not only `openai_response_store`'s. Only compose response-body filters after this one that tolerate incremental fragments; `openai_stream_events` and `openai_response_store` are compatible because they persist streamed turns from the accumulator, not a buffered body, whereas any other response-body rewriter needing the complete buffered body would instead receive fragments.
+ 
+diff --git a/examples/README.md b/examples/README.md
+index 1bbdf36e..bc0892a0 100644
+--- a/examples/README.md
++++ b/examples/README.md
+@@ -91,6 +91,7 @@ before sending requests.
+ | [agentic-loop-deferred-mcp-fixture.yaml](configs/openai/responses/agentic-loop-deferred-mcp-fixture.yaml) | Minimal agentic-loop pipeline that sanitizes deferred MCP connectors on the first inference round. `defer_loading: true` skips `tools/list`, so replay never opens an independent MCP callout |
+ | [agentic-loop-fixture.yaml](configs/openai/responses/agentic-loop-fixture.yaml) | Minimal agentic loop pipeline for inference fixture replay |
+ | [agentic-loop.yaml](configs/openai/responses/agentic-loop.yaml) | Demonstrates the openai_agentic_loop filter with iterative_request_router for step-based model-tool-model looping in the Responses API |
++| [background-llm-d-async.yaml](configs/openai/responses/background-llm-d-async.yaml) | llm-d-async (https://github.com/wseaton/llm-d-async-rs) is an asynchronous inference processor: requests wait in durable, deadline-ordered queues, are retried and shed under flow control, and interrupted vLLM generations resume from their saved tokens |
+ | [body-size-limits.yaml](configs/openai/responses/body-size-limits.yaml) | Demonstrates how raw request body size is enforced across a chain of OpenAI Responses filters that each buffer the request body |
+ | [client-tool-compat-chat-completions.yaml](configs/openai/responses/client-tool-compat-chat-completions.yaml) | Lets a rich Codex-style Responses client (POST /v1/responses with custom, namespace, local shell, and client-executed tool_search tools) reach a function-only Chat Completions backend (POST /v1/chat/completions) by composing openai_client_tool_compat with responses_to_chat_completions in one iterative-router step (GitHub issue #1206) |
+ | [client-tool-compat.yaml](configs/openai/responses/client-tool-compat.yaml) | Lets a rich Codex-style Responses client talk to a function-only Responses backend (for example vLLM at POST /v1/responses) without routing through /v1/chat/completions and without executing client-owned tools in Praxis |
 diff --git a/examples/configs/openai/responses/background-llm-d-async.yaml b/examples/configs/openai/responses/background-llm-d-async.yaml
 new file mode 100644
-index 00000000..87aa5f82
+index 00000000..c46f2f11
 --- /dev/null
 +++ b/examples/configs/openai/responses/background-llm-d-async.yaml
-@@ -0,0 +1,115 @@
-+# OpenAI Responses in front of llm-d-async, with background mode.
+@@ -0,0 +1,112 @@
++# OpenAI Responses in front of llm-d, with background mode run by llm-d-async.
 +#
 +# llm-d-async (https://github.com/wseaton/llm-d-async-rs) is an
 +# asynchronous inference processor: requests wait in durable, deadline-ordered
 +# queues, are retried and shed under flow control, and interrupted vLLM
-+# generations resume from their saved tokens. It serves OpenAI-compatible
-+# /v1/chat/completions that hold the connection until the queued request
-+# finishes, and a request API with results delivered by request ID.
++# generations resume from their saved tokens. Its request API delivers results
++# by request ID.
 +#
-+# Foreground requests are translated to Chat Completions and sent to the
-+# processor's OpenAI-compatible route. The `headers` filter inside the IRR step
-+# sets the llm-d inference objective and the processor deadline for them. The
-+# IRR, stream-event, and translation timeouts are raised above that deadline
-+# because the processor holds the connection while the request is queued.
++# Foreground requests are translated to Chat Completions and sent to the llm-d
++# inference gateway as `interactive` work; the `headers` filter inside the IRR
++# step sets the inference objective. The IRR, stream-event, and translation
++# timeouts allow for long generations and time spent queued in flow control.
 +#
 +# `background: true` requests pass openai_responses_format (`background:
 +# continue`) and are run by the response store's `background` section:
@@ -2496,7 +2481,8 @@ index 00000000..87aa5f82
 +# previous_response_id, conversation, and server-side tools are rejected
 +# with a 400.
 +#
-+# The processor listens on 127.0.0.1:3001. The response store keeps records in
++# The inference gateway listens on 127.0.0.1:8000 and the processor on
++# 127.0.0.1:3001. The response store keeps records in
 +# responses.db; keep the database outside this file's directory, whose writes
 +# the config watcher would treat as config changes.
 +
@@ -2557,23 +2543,21 @@ index 00000000..87aa5f82
 +                request_set:
 +                  - name: x-llm-d-inference-objective
 +                    value: interactive
-+                  - name: x-llm-d-async-timeout
-+                    value: 10m
 +              - filter: router
 +                routes:
 +                  - path_prefix: "/"
-+                    cluster: "llm-d-async"
++                    cluster: "inference-gateway"
 +              - filter: load_balancer
 +                clusters:
-+                  - name: "llm-d-async"
++                  - name: "inference-gateway"
 +                    endpoints:
-+                      - "127.0.0.1:3001"
++                      - "127.0.0.1:8000"
 +            on_result:
 +              - default: true
 +                done: true
 +
 +insecure_options:
-+  allow_private_endpoints: true # example proxies to a local processor
++  allow_private_endpoints: true # example proxies to a local gateway and processor
 diff --git a/tests/integration/tests/suite/examples/background_llm_d_async.rs b/tests/integration/tests/suite/examples/background_llm_d_async.rs
 new file mode 100644
 index 00000000..2c33da6c
@@ -2801,3 +2785,16 @@ index 00000000..2c33da6c
 +    }
 +    assert!(processor.requests().is_empty(), "nothing reaches the processor");
 +}
+diff --git a/tests/integration/tests/suite/examples/mod.rs b/tests/integration/tests/suite/examples/mod.rs
+index 07da5630..5e39c91c 100644
+--- a/tests/integration/tests/suite/examples/mod.rs
++++ b/tests/integration/tests/suite/examples/mod.rs
+@@ -19,6 +19,8 @@ mod aws_sigv4;
+ mod azure_ad;
+ mod azure_translation;
+ #[cfg(feature = "store-sqlite")]
++mod background_llm_d_async;
++#[cfg(feature = "store-sqlite")]
+ mod client_tool_compat_chat_completions;
+ #[cfg(feature = "store-sqlite")]
+ mod compact;

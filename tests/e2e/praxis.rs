@@ -1,7 +1,7 @@
 //! Praxis AI in front of the processor, driven with the official OpenAI SDK's
-//! Responses API: foreground calls through the processor's OpenAI-compatible
-//! routes, background responses through Praxis's response store, and a real
-//! vLLM behind a gateway that evicts streams.
+//! Responses API: foreground calls straight to the gateway as `interactive`,
+//! background responses through Praxis's response store and the processor as
+//! `batch`, and a real vLLM behind a gateway that evicts streams.
 //!
 //! Set `PRAXIS_AI_BIN` to a `praxis-ai` built with the `full` and
 //! `store-sqlite` features (and the vLLM variables in `vllm.rs`) to run it;
@@ -32,11 +32,10 @@ impl Drop for Praxis {
     }
 }
 
-/// Praxis AI's configuration: Responses in, Chat Completions to the
-/// processor for foreground calls, the processor's request API for
-/// background ones.
-fn config(listen: u16, processor: &str, database: &Path) -> String {
-    let processor_addr = processor.trim_start_matches("http://");
+/// Praxis AI's configuration: Responses in, Chat Completions to the gateway
+/// for foreground calls, the processor's request API for background ones.
+fn config(listen: u16, processor: &str, gateway: &str, database: &Path) -> String {
+    let gateway_addr = gateway.trim_start_matches("http://");
     format!(
         r#"
 listeners:
@@ -95,17 +94,15 @@ filter_chains:
                 request_set:
                   - name: x-llm-d-inference-objective
                     value: interactive
-                  - name: x-llm-d-async-timeout
-                    value: 10m
               - filter: router
                 routes:
                   - path_prefix: "/"
-                    cluster: llm-d-async
+                    cluster: inference-gateway
               - filter: load_balancer
                 clusters:
-                  - name: llm-d-async
+                  - name: inference-gateway
                     endpoints:
-                      - "{processor_addr}"
+                      - "{gateway_addr}"
             on_result:
               - default: true
                 done: true
@@ -117,7 +114,7 @@ insecure_options:
 }
 
 impl Praxis {
-    async fn start(dir: &Path, processor: &str) -> Option<Self> {
+    async fn start(dir: &Path, processor: &str, gateway: &str) -> Option<Self> {
         let Ok(bin) = std::env::var("PRAXIS_AI_BIN") else {
             assert!(
                 std::env::var("REQUIRE_PRAXIS").is_err(),
@@ -130,7 +127,11 @@ impl Praxis {
         let path = dir.join("praxis.yaml");
         let data = dir.join("praxis-data");
         std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(&path, config(port, processor, &data.join("responses.db"))).unwrap();
+        std::fs::write(
+            &path,
+            config(port, processor, gateway, &data.join("responses.db")),
+        )
+        .unwrap();
         let log_path =
             std::env::var("PRAXIS_LOG").map_or_else(|_| dir.join("praxis.log"), PathBuf::from);
         let log = std::fs::File::create(log_path).unwrap();
@@ -197,13 +198,14 @@ fn tool_request() -> Value {
 
 const ANSWER: &str = "Paris is the capital of France and sits on the Seine. It is known for the Eiffel Tower and the Louvre.";
 
-fn objective(gateway: &Gateway) -> String {
-    let generate = gateway
+/// The objective on the first request the gateway saw at `path`.
+fn objective(gateway: &Gateway, path: &str) -> String {
+    let sent = gateway
         .forwarded()
         .into_iter()
-        .find(|f| f.path == GENERATE)
-        .expect("a generate call");
-    generate.headers["x-llm-d-inference-objective"]
+        .find(|f| f.path == path)
+        .expect("a call at the path");
+    sent.headers["x-llm-d-inference-objective"]
         .to_str()
         .unwrap()
         .to_owned()
@@ -236,29 +238,22 @@ async fn praxis_ai_in_front_of_the_processor() {
         dir.path(),
         Spec::new(json!({"poll_interval_ms": 100, "queues": [{
             "queue_name": "agents", "igw_base_url": gateway.url, "inference_objective": "batch",
-            "resumable": true, "render_url": gateway.url,
+            "render_url": gateway.url,
         }]})),
     )
     .await;
-    let Some(praxis) = Praxis::start(dir.path(), &p.api).await else {
+    let Some(praxis) = Praxis::start(dir.path(), &p.api, &gateway.url).await else {
         return;
     };
     let chat_cut = case("chat").cut;
 
-    // Proxying a normal API into the queue: a foreground Responses call.
+    // A foreground Responses call goes to the gateway as interactive work.
     gateway.clear();
     let got = praxis.sdk("foreground", chat_request()).await;
     assert_eq!(got["status"], "completed", "{got}");
     assert_eq!(got["text"], ANSWER);
     assert_eq!(got["output_types"], json!(["reasoning", "message"]));
-    assert_eq!(objective(&gateway), "interactive");
-
-    // Evicted mid-generation, invisibly to the caller.
-    gateway.clear();
-    gateway.then(Generate::Cut(chat_cut));
-    let got = praxis.sdk("foreground", chat_request()).await;
-    assert_eq!(got["text"], ANSWER, "{got}");
-    assert_resumed(&gateway);
+    assert_eq!(objective(&gateway, "/v1/chat/completions"), "interactive");
 
     // Background mode: queued, in progress, completed, and evicted on the way.
     gateway.clear();
@@ -271,7 +266,7 @@ async fn praxis_ai_in_front_of_the_processor() {
     assert_eq!(got["text"], ANSWER);
     assert_eq!(got["retrieved_again"]["text"], ANSWER);
     assert!(got["id"].as_str().unwrap().starts_with("resp_"));
-    assert_eq!(objective(&gateway), "batch");
+    assert_eq!(objective(&gateway, GENERATE), "batch");
     assert_resumed(&gateway);
 
     // Cancelling a background response that is still generating.
@@ -349,9 +344,8 @@ async fn praxis_ai_in_front_of_the_processor() {
     );
 
     // A streamed call, as Codex makes every call: reasoning streams as its own
-    // item ahead of the text, through an eviction.
+    // item ahead of the text.
     gateway.clear();
-    gateway.then(Generate::Cut(chat_cut));
     let got = praxis.sdk("stream", chat_request()).await;
     assert_eq!(got["final"]["status"], "completed", "{got}");
     assert_eq!(got["text"], ANSWER);
@@ -375,7 +369,6 @@ async fn praxis_ai_in_front_of_the_processor() {
         .collect();
     let first = |kind: &str| events.iter().position(|e| *e == kind).unwrap();
     assert!(first("response.reasoning_text.delta") < first("response.output_text.delta"));
-    assert_resumed(&gateway);
 
     // What agent clients send that Chat Completions cannot represent runs
     // anyway: no reasoning summary, no truncation.

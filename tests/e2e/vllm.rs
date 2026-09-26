@@ -158,9 +158,6 @@ pub enum Generate {
     Cut(usize),
     /// Holds the stream open after this many output token chunks.
     Stall(usize),
-    /// Holds the stream after this many output token chunks for a while,
-    /// then goes on.
-    Pause(usize, Duration),
     /// Refuses with 429, as flow control sheds.
     Shed,
 }
@@ -310,7 +307,7 @@ async fn forward(State(state): State<Arc<GatewayState>>, request: Request) -> Re
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     tokio::spawn(async move {
         let limit = match action {
-            Generate::Cut(n) | Generate::Stall(n) | Generate::Pause(n, _) => n,
+            Generate::Cut(n) | Generate::Stall(n) => n,
             Generate::Shed => unreachable!("shed replies before forwarding"),
         };
         let mut upstream = reply.bytes_stream();
@@ -323,7 +320,6 @@ async fn forward(State(state): State<Arc<GatewayState>>, request: Request) -> Re
                 if sent == limit {
                     match action {
                         Generate::Stall(_) => std::future::pending::<()>().await,
-                        Generate::Pause(_, pause) => tokio::time::sleep(pause).await,
                         _ => {
                             let _ = tx
                                 .send(Err(std::io::Error::other("gateway evicted the stream")))

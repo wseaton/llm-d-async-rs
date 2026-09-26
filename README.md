@@ -2,8 +2,7 @@
 
 > [!IMPORTANT]
 > This Rust processor is experimental. It is a place to prove designs (resume
-> from saved tokens, OpenAI-compatible routes, results by request, the
-> Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
+> from saved tokens, results by request, the Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
 > What proves out is meant to be upstreamed and, where the project decides it
 > belongs, refactored back into the Go processor. It is not a supported
 > replacement for it.
@@ -141,7 +140,6 @@ were written. Set a lifecycle rule to abort incomplete multipart uploads.
 | `--max-json-body-bytes` | 64 MiB | largest JSON submission (buffered in memory) |
 | `--result-blob-retention` | 24h | how long a result body stays readable after a destructive pop |
 | `--request-result-ttl` | 1h | how long a result [delivered by request](#results-by-request) stays when its queue sets no `result_ttl_seconds` |
-| `--facade-timeout` | 10m | deadline of an [OpenAI-compatible](#openai-compatible-routes) request without `x-llm-d-async-timeout` |
 | `--tls-ca-cert`, `--tls-cert`, `--tls-key`, `--tls-insecure-skip-verify` | | gateway TLS (native TLS) |
 | `-v` | 2 | 2 info, 3–4 debug, 5+ trace; `RUST_LOG` overrides |
 
@@ -162,7 +160,7 @@ Durations use Go syntax (`90s`, `1h30m`, `250ms`), so existing values carry over
       "result_queue_name": "", "result_ttl_seconds": 0,
       "labels": {"tier": "batch"},
       "gate_type": "quota", "gate_params": {"mode": "concurrency", "limit": 8},
-      "resumable": false, "render_url": null
+      "render_url": null
     }
   ]
 }
@@ -171,7 +169,10 @@ Durations use Go syntax (`90s`, `1h30m`, `250ms`), so existing values carry over
 Unknown fields are rejected. Redis-only fields (`url`, `retry_queue_name`,
 `claim_*`, `enable_tracing`) must be removed. Result routes starting with `@`
 are the processor's own and cannot be configured. Each poll, a queue dispatches at
-most `batch_size × budget` requests, earliest deadline first.
+most `batch_size × budget` requests, earliest deadline first. The queue's
+`inference_objective` is sent as `x-llm-d-inference-objective`; a request's own
+header replaces it. A `render_url` makes the queue
+[resumable](#resumable-queues).
 
 Pools (`pools.json`) and merge policies (`merge.json`) keep the Go format:
 `[{"id","workers","gate_type","gate_params"}]` and
@@ -188,7 +189,6 @@ submitted, except on [resumable queues](#resumable-queues).
 | `POST /v1/requests/batch` | JSON array, all-or-nothing |
 | `POST /v1/requests/cancel` | `{"ids": [...]}`; best effort before dispatch |
 | `GET /v1/requests/{id}?request_token=` | `{"id","status"}`: `queued`, `in_progress` (claimed by a worker) or `done`; without `request_token`, the live submission of `id` |
-| `POST /v1/chat/completions`, `POST /v1/completions` | [OpenAI-compatible routes](#openai-compatible-routes): submit, wait, answer |
 | `GET /v1/queues` | queues with depth |
 | `POST /v1/results/{route}/claims?wait_ms=&lease_ms=` | lease the oldest result: `{"claim_id","owner_token","lease_ms","result"}`, or 204 |
 | `POST /v1/results/{route}/claims/{id}/renew` | `{"owner_token","lease_ms"}`; 409 once ownership is lost |
@@ -231,9 +231,9 @@ repo; its rule (anything not JSON goes to a blob) does not.
 
 ## Resumable queues
 
-A queue with `"resumable": true` sends eligible `/v1/completions` and
-`/v1/chat/completions` requests through vLLM's token layer. `render_url` names
-a vLLM serving the queue's model with `--enable-scale-out`:
+A queue with a `render_url`, a vLLM serving the queue's model with
+`--enable-scale-out`, sends eligible `/v1/completions` and
+`/v1/chat/completions` requests through vLLM's token layer:
 
 ```text
  caller's request ──► render_url /v1/…/render ──► prompt token IDs + sampling params
@@ -276,36 +276,12 @@ check that the token layer reproduces every recorded response and resumes from
 every cut. `tests/e2e/resumable.rs` runs the binary against a real vLLM (see
 [Development](#development)).
 
-## OpenAI-compatible routes
-
-`POST /v1/chat/completions` and `POST /v1/completions` on the API port take an
-unmodified OpenAI request, submit it to a queue with its result
-[delivered by request](#results-by-request), hold the connection until the
-result arrives, and answer with it: the response's status and body, or an
-OpenAI-shaped error (`DEADLINE_EXCEEDED` 504, `GATE_DROPPED` 429, `CANCELLED`
-409, `GATE_ERROR` 503, `INFERENCE_ERROR` 502). A `stream: true` request is
-queued unstreamed, so it can resume; the caller gets `: keepalive` comments
-every 10 s while it waits and then the whole response as chat or completion
-chunks (with a usage chunk when `stream_options.include_usage` is set), and an
-error as an error event. A caller that disconnects cancels its request, which
-only works before dispatch.
-
-| request header | |
-|---|---|
-| `x-llm-d-async-queue` | queue name (default: the first queue) |
-| `x-llm-d-async-timeout` | deadline as a duration from now, Go syntax (default `--facade-timeout`) |
-| `x-llm-d-inference-objective` | InferenceObjective for llm-d-router; replaces the queue's `inference_objective` |
-| `x-llm-d-inference-fairness-id` | flow-control fairness identity |
-
-The queue's `inference_objective` is sent as `x-llm-d-inference-objective`.
-
 ## Praxis AI
 
 [`bench/praxis-agents`](bench/praxis-agents/README.md) runs agents through
 [Praxis AI](https://github.com/praxis-proxy/ai) in front of the processor:
-Responses API calls through the OpenAI-compatible routes, background responses
-through results by request, and resumption under eviction, with the Praxis AI
-patches it needs.
+background responses through results by request and resumption under
+eviction, with the Praxis AI patches it needs.
 
 ## Gates
 
@@ -354,14 +330,14 @@ cargo test                  # unit tests
 cargo test --test e2e       # the binary against a stand-in gateway
 ```
 
-The resumable, OpenAI-compatible and Praxis e2e tests run against a real vLLM
+The resumable and Praxis e2e tests run against a real vLLM
 0.30 frontend over a GPU-free engine that replays scripted outputs
 (`tests/fixtures/vllm/v0.30.0/resume`), with a gateway in between that cuts,
 stalls or sheds generate streams. They are skipped unless `VLLM_BIN` (the vLLM
 0.30.0 CLI) and `VCR_BIN` (`vllm-vcr` built for the 0.30 protocol, see
 `tests/fixtures/vllm/README.md`) are set, and the Praxis test also needs
 `PRAXIS_AI_BIN`. `REQUIRE_VLLM=1` and `REQUIRE_PRAXIS=1` make skipping a
-failure. The OpenAI SDK clients run through `uv`.
+failure. The OpenAI SDK client runs through `uv`.
 
 Postgres tests need `TEST_DATABASE_URL`, a database where they may create
 schemas (each test gets its own). Without it they are skipped; CI sets

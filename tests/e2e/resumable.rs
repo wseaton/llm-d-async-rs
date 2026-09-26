@@ -12,7 +12,7 @@ const GENERATE: &str = "/inference/v1/generate";
 fn transport(gateway: &Gateway) -> Value {
     json!({"poll_interval_ms": 100, "queues": [{
         "queue_name": "r", "igw_base_url": gateway.url,
-        "resumable": true, "render_url": gateway.url,
+        "render_url": gateway.url,
     }]})
 }
 

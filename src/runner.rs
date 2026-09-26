@@ -196,7 +196,6 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
         },
         default_result_queue: transport.result_queue_name.clone(),
         request_result_ttl: cli.request_result_ttl,
-        facade_timeout: cli.facade_timeout,
         ready: Arc::clone(&ready),
     };
     let servers = TaskTracker::new();

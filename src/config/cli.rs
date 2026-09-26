@@ -63,10 +63,6 @@ pub struct Cli {
     /// queue sets no result TTL.
     #[arg(long, default_value = "1h", value_parser = parse_duration)]
     pub request_result_ttl: Duration,
-    /// The deadline of an OpenAI-compatible request that sets no
-    /// x-llm-d-async-timeout.
-    #[arg(long, default_value = "10m", value_parser = parse_duration)]
-    pub facade_timeout: Duration,
     /// How long a result body stays readable after a destructive pop.
     #[arg(long, default_value = "24h", value_parser = parse_duration)]
     pub result_blob_retention: Duration,

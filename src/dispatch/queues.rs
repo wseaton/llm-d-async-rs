@@ -157,7 +157,7 @@ impl Queues {
                 igw_base_url: config.igw_base_url.clone(),
                 request_path: config.request_path_url.clone(),
                 inference_objective: config.inference_objective.clone(),
-                render_url: config.render_url.clone().filter(|_| config.resumable),
+                render_url: config.render_url.clone(),
             });
             self.merge
                 .add(&config.worker_pool_id, Source { meta, rx })?;

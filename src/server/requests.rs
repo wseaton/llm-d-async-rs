@@ -238,15 +238,6 @@ fn submitted(r: &NewRequest) -> Submitted {
     }
 }
 
-/// Submits one JSON request.
-pub async fn submit_json(state: &AppState, sub: SubmitRequest) -> Result<Submitted, ApiError> {
-    let mut staged = StagedBlobs::new(state);
-    let new = from_json(state, sub, &mut staged).await?;
-    let response = submitted(&new);
-    commit(state, vec![new], staged).await?;
-    Ok(response)
-}
-
 /// Commits submissions in a task of its own: a client that disconnects now
 /// cannot separate the commit from the fate of its staged blobs. A failed
 /// commit may still have landed (a lost reply), so its blobs are left for

@@ -57,12 +57,10 @@ pub struct QueueConfig {
     pub gate_params: GateParams,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// Send eligible completions and chat requests through vLLM's token
-    /// layer, so an interrupted generation continues from its saved tokens.
-    #[serde(default)]
-    pub resumable: bool,
-    /// A vLLM serving this queue's model with `--enable-scale-out`, which
-    /// renders and derenders a resumable queue's requests.
+    /// A vLLM serving this queue's model with `--enable-scale-out`. Setting
+    /// it makes the queue resumable: eligible completions and chat requests
+    /// go through vLLM's token layer, rendered and derendered here, so an
+    /// interrupted generation continues from its saved tokens.
     #[serde(default)]
     pub render_url: Option<String>,
 }
@@ -139,12 +137,6 @@ impl TransportConfig {
             if let Err(e) = reqwest::Url::parse(&q.igw_base_url) {
                 return invalid(format!("queue {:?}: igw_base_url: {e}", q.queue_name));
             }
-            if q.render_url.is_some() != q.resumable {
-                return invalid(format!(
-                    "queue {:?}: a resumable queue needs a render_url, and only it takes one",
-                    q.queue_name
-                ));
-            }
             if let Some(url) = &q.render_url
                 && let Err(e) = reqwest::Url::parse(url)
             {
@@ -193,18 +185,17 @@ mod tests {
         assert_eq!(q.id, "q");
         assert_eq!(q.worker_pool_id, "default");
         assert_eq!(q.request_path_url, "/v1/completions");
-        assert!(!q.resumable);
+        assert_eq!(q.render_url, None);
     }
 
     #[test]
-    fn resumable_opt_in() {
+    fn render_url_makes_a_queue_resumable() {
         let cfg = TransportConfig::parse(
-            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://render:8000"}]}"#,
+            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","render_url":"http://render:8000"}]}"#,
             &pools(),
             false,
         )
         .unwrap();
-        assert!(cfg.queues[0].resumable);
         assert_eq!(
             cfg.queues[0].render_url.as_deref(),
             Some("http://render:8000")
@@ -212,19 +203,15 @@ mod tests {
 
         for (input, want) in [
             (
-                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true}]}"#,
-                "a resumable queue needs a render_url",
-            ),
-            (
-                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","render_url":"http://render"}]}"#,
-                "a resumable queue needs a render_url",
-            ),
-            (
-                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"not a url"}]}"#,
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","render_url":"not a url"}]}"#,
                 "render_url",
             ),
             (
-                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r","tool_call_parser":"glm47"}]}"#,
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r"}]}"#,
+                "unknown field `resumable`",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","render_url":"http://r","tool_call_parser":"glm47"}]}"#,
                 "unknown field `tool_call_parser`",
             ),
         ] {

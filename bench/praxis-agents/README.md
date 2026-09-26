@@ -7,18 +7,23 @@ piece belongs in.
 
 > [!IMPORTANT]
 > The Rust processor used here is experimental. It is a place to prove designs
-> (resume from saved tokens, OpenAI-compatible routes, results by request, the
-> Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
+> (resume from saved tokens, results by request, the Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
 > What proves out is meant to be upstreamed and, where the project decides it
 > belongs, refactored back into the Go processor. It is not a supported
 > replacement for it.
 
 ```text
- agent / SDK ──► Praxis AI ──────────► llm-d-async ─────────► llm-d-router ─────────────► vLLM
- Responses API   Responses ⇄ Chat      durable queues,        coordinator (optional),    render
-                 response store,       deadlines, retries,    EPP flow control,          generate
-                 background lifecycle  resume from tokens     eviction, prefix routing   derender
+ agent / SDK ──► Praxis AI ───────── foreground (interactive) ──────► llm-d-router ─────────────► vLLM
+ Responses API   Responses ⇄ Chat                                     coordinator (optional),    render
+                 response store,  ── background ──► llm-d-async ────► EPP flow control,          generate
+                 background          (batch)        durable queues,   eviction, prefix routing   derender
+                 lifecycle                          resume from tokens
 ```
+
+Foreground calls are `interactive`: flow control queues them by priority and
+never evicts them, so they go straight to the router. Background responses are
+`batch` work that flow control may evict at any time, so they go through
+llm-d-async.
 
 The loop that makes eviction safe: llm-d-async renders the request to token
 IDs, streams `/inference/v1/generate` through the router, and derenders the
@@ -31,7 +36,7 @@ uninterrupted response.
 
 | Goal | Result |
 |---|---|
-| Unmodified OpenAI clients get queueing, priority and deadlines | works, OpenAI SDK and Codex CLI |
+| Unmodified agents and SDKs run as prioritized llm-d traffic | works, OpenAI SDK and Codex CLI |
 | Responses `background: true` (submit, poll, cancel) | works through Praxis AI |
 | Eviction and resume invisible to the caller | token-identical locally; on the GPU cluster an evicted generation resumed through the llm-d coordinator |
 
@@ -39,6 +44,8 @@ On the cluster (GLM-4.7-Flash on an H200, llm-d-router v0.10.0):
 
 - **Codex** fixed a bug and ran its tests through the whole stack: six tool
   calls in 6.5 s, with 88% of prompt tokens served from vLLM's prefix cache.
+  (Those runs sent foreground calls through a since-removed OpenAI route on
+  the processor; they now go straight to the router.)
 - **Through the coordinator**, a resumable queue needs no changes. The
   coordinator passes `/inference/v1/generate` through its decode step and
   forwards the objective header. With 16 `batch` generations of 6,000 tokens
@@ -50,7 +57,7 @@ On the cluster (GLM-4.7-Flash on an H200, llm-d-router v0.10.0):
 
 | Piece | Built here | Upstream home | Next step |
 |---|---|---|---|
-| OpenAI door for queued work | processor routes (`/v1/chat/completions`, `GET /v1/requests/{id}`) | llm-d-router coordinator `async-broker` ([#2325](https://github.com/llm-d/llm-d-router/pull/2325), merged) with [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394) | use the broker; offer SSE keepalives for held `stream: true` calls if it lacks them |
+| Results by request | `result_delivery: request`, `GET /v1/requests/{id}` | llm-d-router coordinator `async-broker` enqueue and fetch ([#2325](https://github.com/llm-d/llm-d-router/pull/2325), merged) with [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394) | the same model as the broker's per-request results; Praxis background can move onto the broker with the Go processor |
 | Resume inside one request | the render → generate → derender loop | coordinator request migration ([llm-d-router#2345](https://github.com/llm-d/llm-d-router/issues/2345), proposal), which lists evict-then-resume as a goal | bring this experiment's evidence to #2345 |
 | Resume across requeues | progress saved with the queued request | llm-d-async (Go) | a partial-generation result the processor persists, and a continuation it sends on redispatch |
 | Eviction policy | used as is | flow control ([llm-d-router#2061](https://github.com/llm-d/llm-d-router/pull/2061), design) | none; resume is what makes evicting `batch` work cheap |
@@ -64,7 +71,7 @@ assignment before a PR. The Praxis patches are on the fork for linking:
 [`reload-config-on-content-change`](https://github.com/wseaton/ai/tree/reload-config-on-content-change)
 (0001) and
 [`llm-d-async-background`](https://github.com/wseaton/ai/tree/llm-d-async-background)
-(0001 and 0002,
+(0001, 0002, and the example's foreground change,
 [diff](https://github.com/praxis-proxy/ai/compare/main...wseaton:ai:llm-d-async-background)).
 
 ## What was built
@@ -79,13 +86,6 @@ assignment before a PR. The Praxis patches are on the fork for linking:
   vLLM's own tool and reasoning parsers run in derender, so any parser works. A
   generation that finished but failed to derender keeps its tokens and only
   derenders on retry. See the main README's *Resumable queues*.
-- **OpenAI-compatible routes.** `POST /v1/chat/completions` and
-  `POST /v1/completions` submit, wait and answer. Headers:
-  `x-llm-d-async-queue`, `x-llm-d-async-timeout` (Go duration),
-  `x-llm-d-inference-objective`, `x-llm-d-inference-fairness-id`. `stream: true`
-  callers are queued unstreamed (so they can resume), get `: keepalive` every
-  10 s, then the whole response as chunks. A caller that disconnects cancels
-  its request, which only works before dispatch.
 - **Results by request.** A submission with `"result_delivery": "request"`
   gets its own result route `@request-<id>`, claimed, renewed and acknowledged
   like any route. `GET /v1/requests/{id}` reports `queued`, `in_progress` or
@@ -159,7 +159,7 @@ What Codex sends, and what it took:
 | a `namespace` tool (`multi_agent_v1`) | `openai_client_tool_compat` in the IRR step |
 | the hosted `web_search` tool | `web_search = "disabled"` in Codex's config |
 | `store: false`, full history each turn, `developer` messages, `prompt_cache_key`, `parallel_tool_calls` | translated as is |
-| a model ending turns with `<|user|>` | the processor drops the stop token before derender |
+| a model ending turns with `<|user|>` | the processor drops the stop token before derender (background calls) |
 
 In-cluster service addresses are private, so Praxis needs
 `insecure_options.allow_private_upstreams: true` there.
@@ -172,11 +172,12 @@ llm-d-async queue (`transport.json`):
 {"queues": [{
   "queue_name": "agents", "igw_base_url": "http://gateway:8000",
   "inference_objective": "batch",
-  "resumable": true, "render_url": "http://vllm-render:8000"
+  "render_url": "http://vllm-render:8000"
 }]}
 ```
 
-`render_url` is any vLLM serving the queue's model with `--enable-scale-out`
+`render_url`, which makes the queue resumable, is any vLLM serving the
+queue's model with `--enable-scale-out`
 (render and derender use no GPU). Run vLLM with
 `--enable-prompt-tokens-details` to report cached tokens. `igw_base_url` may be
 the EPP's gateway or a gateway fronted by the llm-d coordinator.
@@ -187,11 +188,12 @@ test ports. The points that matter:
 
 - Foreground: `responses_to_chat_completions` → `path_rewrite` to
   `/v1/chat/completions` → a `headers` filter **inside the IRR step** setting
-  `x-llm-d-inference-objective` and `x-llm-d-async-timeout` (headers set before
-  the IRR do not reach its sub-requests) → the llm-d-async cluster.
-- Timeouts must outlast the deadline, because llm-d-async holds the
-  connection while the request waits: IRR `timeout_ms`,
-  `openai_stream_events.timeout_secs`, and
+  `x-llm-d-inference-objective: interactive` (headers set before the IRR do not
+  reach its sub-requests) → the inference gateway.
+- Background: the response store's `background` section names the
+  processor, queue, objective and deadline.
+- Timeouts must allow for long generations and time queued in flow control:
+  IRR `timeout_ms`, `openai_stream_events.timeout_secs`, and
   `responses_to_chat_completions.stream_timeout_secs: 0`.
 - Keep the response store's database outside the config file's directory on
   Praxis builds without patch 0001.
@@ -216,17 +218,12 @@ cuts, stalls or sheds generate streams the way flow control evicts them.
   - a render error surfaces as vLLM's 400;
   - ineligible requests pass through as submitted;
   - a draining replica hands its progress to the next.
-- **`tests/e2e/facade.rs`**, the official OpenAI Python SDK against the
-  OpenAI-compatible routes, on the embedded store and Postgres:
-  - streamed and non-streamed responses match vLLM's, including evicted runs;
-  - an objective header reaches the gateway;
-  - a missed deadline gives 504;
-  - a caller that disconnects has its queued request cancelled, never sent.
 - **`tests/e2e/praxis.rs`**, the OpenAI SDK's Responses API through Praxis AI:
-  - foreground, and foreground evicted after 24 tokens (the continuation
-    carries 20 prompt + 24 saved tokens), with the same answer and reasoning;
+  - foreground straight to the gateway as `interactive`;
   - streamed foreground with reasoning events ahead of the message;
-  - background `queued → in_progress → completed`, evicted on the way;
+  - background `queued → in_progress → completed`, evicted after 24 tokens
+    on the way (the continuation carries 20 prompt + 24 saved tokens), with
+    the same answer and reasoning;
   - idempotent cancel;
   - function calls in both modes;
   - a background turn continuing a background tool call, then a foreground
@@ -275,9 +272,6 @@ offline; fetch it once. The SDK clients run through `uv`.
 
 ## Known limits
 
-- **Streaming is buffered.** A streamed call waits in the queue and gets its
-  events at the end, so time to first token is the whole generation. That is
-  fine for background agents, and it is what makes resume possible.
 - **Derender does not report** reasoning-token counts (Praxis reports `0`),
   `stop_reason`, or `system_fingerprint`. Stop strings, stop token IDs, prompt
   truncation, logprobs, seeds, structured output, forced tool choice,

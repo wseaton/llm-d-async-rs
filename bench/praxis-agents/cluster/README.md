@@ -1,9 +1,9 @@
 # Codex through Praxis AI and llm-d-async on the cluster
 
 ```text
-codex (laptop) ──port-forward──► agents-praxis ──► agents-processor ──► agents-epp (Envoy + EPP) ──► agents-vllm
-                                  Responses API      queue, resume         flow control, eviction,        GLM-4.7-Flash
-                                  background mode                          precise prefix routing         render/derender
+codex (laptop) ──port-forward──► agents-praxis ─────────────────────────► agents-epp (Envoy + EPP) ──► agents-vllm
+                                  Responses API  ──background──► agents-processor   flow control, eviction,        GLM-4.7-Flash
+                                  background mode                queue, resume       precise prefix routing         render/derender
 ```
 
 - Model: `zai-org/GLM-4.7-Flash` (30B-A3B MoE, reasoning and tool calls with
@@ -15,8 +15,8 @@ codex (laptop) ──port-forward──► agents-praxis ──► agents-proces
   `agents` (`interactive`) straight to the EPP gateway, and `agents-coord`
   (`batch`) through the coordinator.
 - Praxis AI with both patches from `../praxis-ai/`: foreground Responses
-  calls go to the processor's `/v1/chat/completions` as `interactive`;
-  `background: true` calls go through the processor's request API as `batch`.
+  calls go straight to the EPP gateway as `interactive`; `background: true`
+  calls go through the processor's request API as `batch`.
 - The llm-d coordinator (`coordinator.yaml`): `agents-coord-gw` routes requests
   with an `EPP-Profile` header to the same EPP and everything else to a
   decode-only coordinator, as llm-d-router's coordinator e2e does. The
@@ -66,10 +66,12 @@ coordinator queue, then 8 `interactive` requests straight to the EPP gateway.
 
 ```sh
 BATCH='{"model":"zai-org/GLM-4.7-Flash","messages":[{"role":"user","content":"Write a long story."}],"max_tokens":6000,"ignore_eos":true}'
-for i in $(seq 16); do
-  curl -s -H 'content-type: application/json' -H 'x-llm-d-async-queue: agents-coord' \
-    -H 'x-llm-d-async-timeout: 20m' -d "$BATCH" http://agents-processor:8080/v1/chat/completions &
-done
+DEADLINE=$(( $(date +%s) + 1200 ))
+REQS=$(for i in $(seq 16); do
+  printf '{"id":"evict-%s","deadline":%s,"request_queue_name":"agents-coord","endpoint":"/v1/chat/completions","payload":%s}\n' \
+    "$i" "$DEADLINE" "$BATCH"
+done | paste -sd, -)
+curl -s -H 'content-type: application/json' -d "[$REQS]" http://agents-processor:8080/v1/requests/batch
 sleep 8
 for i in $(seq 8); do
   curl -s -H 'content-type: application/json' -H 'x-llm-d-inference-objective: interactive' \
@@ -77,11 +79,14 @@ for i in $(seq 8); do
     http://agents-epp:80/v1/chat/completions &
 done
 wait
+for i in $(seq 16); do
+  curl -s -X POST 'http://agents-processor:8080/v1/results/result-list/pop?wait_ms=600000'
+done
 ```
 
 Eviction shows as `Request evicted by flow control` in the EPP log and
 `resuming interrupted generation` in the processor's; every batch response
-still reports 6,000 completion tokens.
+still reports 6,000 completion tokens in its payload.
 
 ## Teardown
 

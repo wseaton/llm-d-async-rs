@@ -2,7 +2,6 @@
 
 pub mod admin;
 pub mod error;
-pub mod facade;
 pub mod health;
 pub mod requests;
 pub mod results;
@@ -43,19 +42,11 @@ pub struct AppState {
     /// How long a result delivered by request stays when its queue sets no
     /// result TTL.
     pub request_result_ttl: Duration,
-    /// The deadline of a facade request that names none.
-    pub facade_timeout: Duration,
     pub ready: Arc<AtomicBool>,
 }
 
 pub fn api_router(state: AppState) -> Router {
-    let json_body = DefaultBodyLimit::max(state.limits.json_body);
     Router::new()
-        .route("/v1/chat/completions", post(facade::chat).layer(json_body))
-        .route(
-            "/v1/completions",
-            post(facade::completions).layer(json_body),
-        )
         .route(
             "/v1/requests",
             post(requests::submit).layer(DefaultBodyLimit::disable()),

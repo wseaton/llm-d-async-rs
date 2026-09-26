@@ -33,7 +33,7 @@ pub struct WaitQuery {
 
 /// Retries `attempt` until it finds something or `wait` elapses, waking on
 /// every result write to `route`.
-pub async fn long_poll<T, F, Fut>(
+async fn long_poll<T, F, Fut>(
     state: &AppState,
     route: &str,
     wait: Duration,
