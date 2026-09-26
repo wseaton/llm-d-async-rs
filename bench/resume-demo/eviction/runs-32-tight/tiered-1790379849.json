@@ -1,0 +1,87 @@
+{
+ "run": "tiered-1790379849",
+ "batch": {
+  "requests": 192,
+  "max_tokens": 1500,
+  "identical": 191,
+  "failed": 1,
+  "makespan_s": 73.2,
+  "p50_done_s": 44.8,
+  "max_result_backlog": 1,
+  "mismatches": [
+   {
+    "id": "tiered-1790379849-a-61",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   }
+  ]
+ },
+ "jobs": {
+  "a": {
+   "requests": 64,
+   "deadline_s": 30,
+   "objective": "batch",
+   "identical": 63,
+   "failed": {
+    "None": 1
+   },
+   "met_deadline": 63,
+   "p50_done_s": 21.1,
+   "last_done_s": 25.3
+  },
+  "b": {
+   "requests": 64,
+   "deadline_s": 55,
+   "objective": "batch-2",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 44.8,
+   "last_done_s": 50.7
+  },
+  "c": {
+   "requests": 64,
+   "deadline_s": 80,
+   "objective": "batch-3",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 69.0,
+   "last_done_s": 73.2
+  }
+ },
+ "interactive": {
+  "sent": 480,
+  "ok": 480,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 0.249,
+  "ttft_p95_s": 0.439,
+  "tokens": 93640
+ },
+ "decode": {
+  "vllm_generation_tokens": 381480.0,
+  "batch_decoded": 287840.0,
+  "batch_ideal": 288000,
+  "batch_redone": -160.0,
+  "vllm_prompt_tokens": 381906.0,
+  "prefix_cache_hits": 370288.0,
+  "prefix_cache_queries": 382317.0
+ },
+ "processor": {
+  "request_resumes_total": 400.0,
+  "resumed_tokens_total": 211290.0,
+  "request_retries_total": 24.0
+ },
+ "epp": {
+  "revocations_issued_total": 424.0,
+  "revocations_total": 424.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 193.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-2\"}": 211.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-3\"}": 211.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 480.0
+ }
+}

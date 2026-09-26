@@ -1,0 +1,56 @@
+{
+ "run": "floor-1790376754",
+ "batch": {
+  "requests": 0,
+  "max_tokens": 2000,
+  "identical": 0,
+  "failed": 0,
+  "makespan_s": 0.0,
+  "p50_done_s": NaN,
+  "max_result_backlog": 0,
+  "mismatches": []
+ },
+ "jobs": {
+  "batch": {
+   "requests": 0,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 0,
+   "failed": {},
+   "met_deadline": 0,
+   "p50_done_s": NaN,
+   "last_done_s": null
+  }
+ },
+ "interactive": {
+  "sent": 480,
+  "ok": 480,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 0.159,
+  "ttft_p95_s": 0.223,
+  "tokens": 93640
+ },
+ "decode": {
+  "vllm_generation_tokens": 93640.0,
+  "batch_decoded": 0.0,
+  "batch_ideal": 0,
+  "batch_redone": 0.0,
+  "vllm_prompt_tokens": 5960.0,
+  "prefix_cache_hits": 0.0,
+  "prefix_cache_queries": 5960.0
+ },
+ "processor": {
+  "request_resumes_total": 0.0,
+  "resumed_tokens_total": 0.0,
+  "request_retries_total": 0.0
+ },
+ "epp": {
+  "revocations_issued_total": 0.0,
+  "revocations_total": 0.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 480.0
+ }
+}

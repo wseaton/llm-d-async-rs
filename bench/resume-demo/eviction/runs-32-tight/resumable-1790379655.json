@@ -1,0 +1,203 @@
+{
+ "run": "resumable-1790379655",
+ "batch": {
+  "requests": 192,
+  "max_tokens": 1500,
+  "identical": 168,
+  "failed": 24,
+  "makespan_s": 73.9,
+  "p50_done_s": 49.7,
+  "max_result_backlog": 0,
+  "mismatches": [
+   {
+    "id": "resumable-1790379655-a-0",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-1",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-2",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-3",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-4",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-5",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-6",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-7",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-9",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-11",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-33",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-34",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-a-37",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-94",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-96",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-97",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-98",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-99",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-100",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-101",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-102",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-103",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-104",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "resumable-1790379655-b-105",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   }
+  ]
+ },
+ "jobs": {
+  "a": {
+   "requests": 64,
+   "deadline_s": 30,
+   "objective": "batch",
+   "identical": 51,
+   "failed": {
+    "None": 13
+   },
+   "met_deadline": 51,
+   "p50_done_s": 26.5,
+   "last_done_s": 28.9
+  },
+  "b": {
+   "requests": 64,
+   "deadline_s": 55,
+   "objective": "batch",
+   "identical": 53,
+   "failed": {
+    "None": 11
+   },
+   "met_deadline": 53,
+   "p50_done_s": 47.3,
+   "last_done_s": 53.0
+  },
+  "c": {
+   "requests": 64,
+   "deadline_s": 80,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 65.4,
+   "last_done_s": 73.9
+  }
+ },
+ "interactive": {
+  "sent": 480,
+  "ok": 480,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 0.243,
+  "ttft_p95_s": 0.435,
+  "tokens": 93640
+ },
+ "decode": {
+  "vllm_generation_tokens": 376086.0,
+  "batch_decoded": 282446.0,
+  "batch_ideal": 288000,
+  "batch_redone": -5554.0,
+  "vllm_prompt_tokens": 312303.0,
+  "prefix_cache_hits": 301904.0,
+  "prefix_cache_queries": 313094.0
+ },
+ "processor": {
+  "request_resumes_total": 342.0,
+  "resumed_tokens_total": 211001.0,
+  "request_retries_total": 4.0
+ },
+ "epp": {
+  "revocations_issued_total": 347.0,
+  "revocations_total": 347.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 526.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 480.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"EvictedContextCancelled\",priority=\"-1\"}": 12.0
+ }
+}

@@ -1,0 +1,66 @@
+{
+ "run": "smoke-1790381194",
+ "batch": {
+  "requests": 4,
+  "max_tokens": 100,
+  "identical": 4,
+  "failed": 0,
+  "makespan_s": 0.9,
+  "p50_done_s": 0.9,
+  "max_result_backlog": 0,
+  "submit_s": 0.11,
+  "mismatches": []
+ },
+ "jobs": {
+  "batch": {
+   "requests": 4,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 4,
+   "failed": {},
+   "met_deadline": 4,
+   "p50_done_s": 0.9,
+   "last_done_s": 0.9
+  }
+ },
+ "interactive": {
+  "sent": 2,
+  "ok": 2,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 0.129,
+  "ttft_p95_s": 0.129,
+  "tokens": 375
+ },
+ "decode": {
+  "vllm_generation_tokens": 775.0,
+  "batch_decoded": 400.0,
+  "batch_ideal": 400,
+  "batch_redone": 0.0,
+  "vllm_prompt_tokens": 109.0,
+  "prefix_cache_hits": 64.0,
+  "prefix_cache_queries": 109.0
+ },
+ "pods": {
+  "evict-vllm-84b7c5fff-8cn2r": {
+   "generation_tokens": 775.0,
+   "prompt_tokens": 109.0,
+   "prefix_cache_hits": 64.0,
+   "prefix_cache_queries": 109.0
+  }
+ },
+ "processor": {
+  "request_resumes_total": 0.0,
+  "resumed_tokens_total": 0.0,
+  "request_retries_total": 0.0
+ },
+ "epp": {
+  "revocations_issued_total": 0.0,
+  "revocations_total": 0.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 4.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 2.0
+ }
+}

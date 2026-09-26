@@ -1,0 +1,1646 @@
+{
+ "run": "affinity-precise-1790395318",
+ "batch": {
+  "requests": 384,
+  "max_tokens": 1000,
+  "identical": 76,
+  "failed": 0,
+  "makespan_s": 68.5,
+  "p50_done_s": 66.3,
+  "max_result_backlog": 350,
+  "submit_s": 0.815,
+  "mismatches": [
+   {
+    "id": "affinity-precise-1790395318-a-1",
+    "first_diff": 110,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-2",
+    "first_diff": 12,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-3",
+    "first_diff": 3,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-4",
+    "first_diff": 19,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-5",
+    "first_diff": 148,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-6",
+    "first_diff": 26,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-8",
+    "first_diff": 58,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-9",
+    "first_diff": 139,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-11",
+    "first_diff": 84,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-16",
+    "first_diff": 294,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-17",
+    "first_diff": 12,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-20",
+    "first_diff": 51,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-21",
+    "first_diff": 316,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-22",
+    "first_diff": 99,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-23",
+    "first_diff": 24,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-24",
+    "first_diff": 18,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-25",
+    "first_diff": 154,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-26",
+    "first_diff": 105,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-27",
+    "first_diff": 15,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-28",
+    "first_diff": 26,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-29",
+    "first_diff": 147,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-30",
+    "first_diff": 123,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-31",
+    "first_diff": 16,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-32",
+    "first_diff": 509,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-33",
+    "first_diff": 141,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-34",
+    "first_diff": 66,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-35",
+    "first_diff": 179,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-36",
+    "first_diff": 16,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-37",
+    "first_diff": 83,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-38",
+    "first_diff": 99,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-39",
+    "first_diff": 29,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-40",
+    "first_diff": 98,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-41",
+    "first_diff": 47,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-42",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-43",
+    "first_diff": 141,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-44",
+    "first_diff": 215,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-45",
+    "first_diff": 115,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-46",
+    "first_diff": 127,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-47",
+    "first_diff": 122,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-48",
+    "first_diff": 54,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-49",
+    "first_diff": 16,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-50",
+    "first_diff": 135,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-51",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-52",
+    "first_diff": 155,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-53",
+    "first_diff": 59,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-54",
+    "first_diff": 240,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-55",
+    "first_diff": 186,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-56",
+    "first_diff": 112,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-57",
+    "first_diff": 5,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-58",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-59",
+    "first_diff": 174,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-60",
+    "first_diff": 468,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-61",
+    "first_diff": 90,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-62",
+    "first_diff": 53,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-63",
+    "first_diff": 6,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-64",
+    "first_diff": 110,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-65",
+    "first_diff": 165,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-66",
+    "first_diff": 11,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-67",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-68",
+    "first_diff": 47,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-69",
+    "first_diff": 29,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-70",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-71",
+    "first_diff": 369,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-72",
+    "first_diff": 62,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-73",
+    "first_diff": 86,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-74",
+    "first_diff": 5,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-75",
+    "first_diff": 266,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-76",
+    "first_diff": 32,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-77",
+    "first_diff": 218,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-78",
+    "first_diff": 17,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-79",
+    "first_diff": 28,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-80",
+    "first_diff": 159,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-81",
+    "first_diff": 249,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-82",
+    "first_diff": 141,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-83",
+    "first_diff": 205,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-84",
+    "first_diff": 7,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-85",
+    "first_diff": 5,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-86",
+    "first_diff": 32,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-87",
+    "first_diff": 11,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-88",
+    "first_diff": 139,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-89",
+    "first_diff": 144,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-90",
+    "first_diff": 102,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-91",
+    "first_diff": 43,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-92",
+    "first_diff": 434,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-93",
+    "first_diff": 4,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-94",
+    "first_diff": 42,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-95",
+    "first_diff": 26,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-96",
+    "first_diff": 55,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-97",
+    "first_diff": 112,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-98",
+    "first_diff": 24,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-99",
+    "first_diff": 129,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-100",
+    "first_diff": 419,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-101",
+    "first_diff": 59,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-102",
+    "first_diff": 4,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-103",
+    "first_diff": 408,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-104",
+    "first_diff": 39,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-105",
+    "first_diff": 9,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-106",
+    "first_diff": 39,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-107",
+    "first_diff": 179,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-108",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-109",
+    "first_diff": 87,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-110",
+    "first_diff": 274,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-111",
+    "first_diff": 16,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-112",
+    "first_diff": 86,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-113",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-114",
+    "first_diff": 65,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-115",
+    "first_diff": 43,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-116",
+    "first_diff": 143,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-117",
+    "first_diff": 52,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-118",
+    "first_diff": 65,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-119",
+    "first_diff": 22,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-120",
+    "first_diff": 132,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-121",
+    "first_diff": 157,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-122",
+    "first_diff": 130,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-123",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-124",
+    "first_diff": 10,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-125",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-126",
+    "first_diff": 17,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-a-127",
+    "first_diff": 28,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-128",
+    "first_diff": 119,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-130",
+    "first_diff": 39,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-131",
+    "first_diff": 186,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-132",
+    "first_diff": 2,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-133",
+    "first_diff": 44,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-134",
+    "first_diff": 21,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-135",
+    "first_diff": 25,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-136",
+    "first_diff": 119,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-137",
+    "first_diff": 433,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-138",
+    "first_diff": 353,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-139",
+    "first_diff": 182,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-140",
+    "first_diff": 131,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-141",
+    "first_diff": 122,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-142",
+    "first_diff": 64,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-143",
+    "first_diff": 38,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-144",
+    "first_diff": 18,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-145",
+    "first_diff": 89,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-146",
+    "first_diff": 24,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-147",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-148",
+    "first_diff": 11,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-149",
+    "first_diff": 2,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-151",
+    "first_diff": 11,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-152",
+    "first_diff": 444,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-153",
+    "first_diff": 9,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-154",
+    "first_diff": 25,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-155",
+    "first_diff": 88,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-156",
+    "first_diff": 49,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-157",
+    "first_diff": 118,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-158",
+    "first_diff": 127,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-160",
+    "first_diff": 303,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-161",
+    "first_diff": 57,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-163",
+    "first_diff": 45,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-168",
+    "first_diff": 233,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-169",
+    "first_diff": 61,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-170",
+    "first_diff": 230,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-173",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-174",
+    "first_diff": 15,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-177",
+    "first_diff": 9,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-178",
+    "first_diff": 206,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-179",
+    "first_diff": 100,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-180",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-184",
+    "first_diff": 7,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-186",
+    "first_diff": 435,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-187",
+    "first_diff": 56,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-188",
+    "first_diff": 245,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-190",
+    "first_diff": 30,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-192",
+    "first_diff": 109,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-193",
+    "first_diff": 58,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-194",
+    "first_diff": 57,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-195",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-196",
+    "first_diff": 11,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-197",
+    "first_diff": 164,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-198",
+    "first_diff": 81,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-199",
+    "first_diff": 52,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-200",
+    "first_diff": 6,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-201",
+    "first_diff": 95,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-202",
+    "first_diff": 53,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-203",
+    "first_diff": 71,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-204",
+    "first_diff": 20,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-205",
+    "first_diff": 48,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-206",
+    "first_diff": 13,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-207",
+    "first_diff": 345,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-208",
+    "first_diff": 76,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-212",
+    "first_diff": 508,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-213",
+    "first_diff": 646,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-215",
+    "first_diff": 601,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-216",
+    "first_diff": 590,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-219",
+    "first_diff": 704,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-220",
+    "first_diff": 82,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-221",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-222",
+    "first_diff": 375,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-223",
+    "first_diff": 78,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-224",
+    "first_diff": 411,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-225",
+    "first_diff": 145,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-226",
+    "first_diff": 82,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-227",
+    "first_diff": 197,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-228",
+    "first_diff": 5,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-229",
+    "first_diff": 79,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-230",
+    "first_diff": 56,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-231",
+    "first_diff": 11,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-232",
+    "first_diff": 57,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-233",
+    "first_diff": 22,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-234",
+    "first_diff": 166,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-235",
+    "first_diff": 47,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-236",
+    "first_diff": 143,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-237",
+    "first_diff": 76,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-238",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-239",
+    "first_diff": 5,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-240",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-241",
+    "first_diff": 146,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-242",
+    "first_diff": 372,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-243",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-244",
+    "first_diff": 34,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-245",
+    "first_diff": 27,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-246",
+    "first_diff": 4,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-247",
+    "first_diff": 54,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-248",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-249",
+    "first_diff": 57,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-250",
+    "first_diff": 395,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-251",
+    "first_diff": 71,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-252",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-253",
+    "first_diff": 25,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-254",
+    "first_diff": 32,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-b-255",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-256",
+    "first_diff": 59,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-257",
+    "first_diff": 29,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-258",
+    "first_diff": 170,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-259",
+    "first_diff": 123,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-260",
+    "first_diff": 63,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-261",
+    "first_diff": 36,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-262",
+    "first_diff": 8,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-263",
+    "first_diff": 26,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-264",
+    "first_diff": 37,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-265",
+    "first_diff": 60,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-266",
+    "first_diff": 126,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-267",
+    "first_diff": 239,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-268",
+    "first_diff": 17,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-269",
+    "first_diff": 27,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-270",
+    "first_diff": 262,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-271",
+    "first_diff": 101,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-272",
+    "first_diff": 35,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-273",
+    "first_diff": 68,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-274",
+    "first_diff": 555,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-275",
+    "first_diff": 74,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-276",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-300",
+    "first_diff": 59,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-301",
+    "first_diff": 7,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-302",
+    "first_diff": 18,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-303",
+    "first_diff": 44,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-304",
+    "first_diff": 7,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-305",
+    "first_diff": 635,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-306",
+    "first_diff": 26,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-307",
+    "first_diff": 241,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-308",
+    "first_diff": 213,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-309",
+    "first_diff": 109,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-310",
+    "first_diff": 71,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-311",
+    "first_diff": 75,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-312",
+    "first_diff": 172,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-313",
+    "first_diff": 221,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-314",
+    "first_diff": 39,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-315",
+    "first_diff": 128,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-316",
+    "first_diff": 25,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-317",
+    "first_diff": 45,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-318",
+    "first_diff": 61,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-319",
+    "first_diff": 94,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-320",
+    "first_diff": 7,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-321",
+    "first_diff": 69,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-322",
+    "first_diff": 106,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-323",
+    "first_diff": 104,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-324",
+    "first_diff": 59,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-325",
+    "first_diff": 213,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-326",
+    "first_diff": 41,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-327",
+    "first_diff": 34,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-328",
+    "first_diff": 217,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-329",
+    "first_diff": 105,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-330",
+    "first_diff": 444,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-331",
+    "first_diff": 1,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-332",
+    "first_diff": 76,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-333",
+    "first_diff": 68,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-334",
+    "first_diff": 32,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-335",
+    "first_diff": 143,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-336",
+    "first_diff": 2,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-337",
+    "first_diff": 31,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-338",
+    "first_diff": 2,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-339",
+    "first_diff": 73,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-340",
+    "first_diff": 167,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-341",
+    "first_diff": 145,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-342",
+    "first_diff": 315,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-343",
+    "first_diff": 63,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-344",
+    "first_diff": 174,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-345",
+    "first_diff": 3,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-346",
+    "first_diff": 101,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-347",
+    "first_diff": 217,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-348",
+    "first_diff": 176,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-349",
+    "first_diff": 213,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-350",
+    "first_diff": 33,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-351",
+    "first_diff": 0,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-352",
+    "first_diff": 98,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-353",
+    "first_diff": 21,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-354",
+    "first_diff": 76,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-355",
+    "first_diff": 149,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-356",
+    "first_diff": 138,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-357",
+    "first_diff": 72,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-358",
+    "first_diff": 34,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-359",
+    "first_diff": 166,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-360",
+    "first_diff": 89,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-361",
+    "first_diff": 66,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-362",
+    "first_diff": 116,
+    "len": 1000
+   },
+   {
+    "id": "affinity-precise-1790395318-c-363",
+    "first_diff": 30,
+    "len": 1000
+   }
+  ]
+ },
+ "jobs": {
+  "a": {
+   "requests": 128,
+   "deadline_s": 3600,
+   "objective": "batch",
+   "identical": 9,
+   "failed": {},
+   "met_deadline": 128,
+   "p50_done_s": 66.3,
+   "last_done_s": 68.1
+  },
+  "b": {
+   "requests": 128,
+   "deadline_s": 3600,
+   "objective": "batch",
+   "identical": 24,
+   "failed": {},
+   "met_deadline": 128,
+   "p50_done_s": 67.7,
+   "last_done_s": 68.5
+  },
+  "c": {
+   "requests": 128,
+   "deadline_s": 3600,
+   "objective": "batch",
+   "identical": 43,
+   "failed": {},
+   "met_deadline": 128,
+   "p50_done_s": 65.2,
+   "last_done_s": 68.5
+  }
+ },
+ "interactive": {
+  "sent": 1920,
+  "ok": 1401,
+  "statuses": [
+   -1,
+   200
+  ],
+  "ttft_p50_s": 2.009,
+  "ttft_p95_s": 9.957,
+  "tokens": 257463
+ },
+ "decode": {
+  "vllm_generation_tokens": 774892.0,
+  "batch_decoded": 517429.0,
+  "batch_ideal": 384000,
+  "batch_redone": 133429.0,
+  "vllm_prompt_tokens": 3475202.0,
+  "prefix_cache_hits": 191936.0,
+  "prefix_cache_queries": 3566794.0
+ },
+ "pods": {
+  "evict-vllm-6bd94bb7c-5jj7b": {
+   "generation_tokens": 189789.0,
+   "prompt_tokens": 828184.0,
+   "prefix_cache_hits": 65376.0,
+   "prefix_cache_queries": 847469.0
+  },
+  "evict-vllm-6bd94bb7c-9pdk6": {
+   "generation_tokens": 191001.0,
+   "prompt_tokens": 909302.0,
+   "prefix_cache_hits": 0.0,
+   "prefix_cache_queries": 943095.0
+  },
+  "evict-vllm-6bd94bb7c-wph88": {
+   "generation_tokens": 178067.0,
+   "prompt_tokens": 810740.0,
+   "prefix_cache_hits": 68208.0,
+   "prefix_cache_queries": 829983.0
+  },
+  "evict-vllm-6bd94bb7c-xs5x2": {
+   "generation_tokens": 216035.0,
+   "prompt_tokens": 926976.0,
+   "prefix_cache_hits": 58352.0,
+   "prefix_cache_queries": 946247.0
+  }
+ },
+ "processor": {
+  "request_resumes_total": 130.0,
+  "resumed_tokens_total": 35448.0,
+  "request_retries_total": 142.0
+ },
+ "epp": {
+  "revocations_issued_total": 272.0,
+  "revocations_total": 272.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 656.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 1536.0
+ }
+}

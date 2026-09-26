@@ -1,0 +1,880 @@
+{
+ "run": "restart-1790377951",
+ "batch": {
+  "requests": 192,
+  "max_tokens": 1500,
+  "identical": 33,
+  "failed": 159,
+  "makespan_s": 99.3,
+  "p50_done_s": 74.6,
+  "max_result_backlog": 31,
+  "mismatches": [
+   {
+    "id": "restart-1790377951-a-0",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-1",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-2",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-3",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-4",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-5",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-6",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-7",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-8",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-9",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-10",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-11",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-12",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-13",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-14",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-15",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-16",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-17",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-18",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-19",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-20",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-21",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-22",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-23",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-24",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-25",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-26",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-27",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-28",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-29",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-30",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-31",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-32",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-33",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-34",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-35",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-36",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-37",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-39",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-40",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-41",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-42",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-43",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-44",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-45",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-46",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-47",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-48",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-49",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-50",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-51",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-52",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-53",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-54",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-55",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-56",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-57",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-58",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-59",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-60",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-61",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-62",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-a-63",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-64",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-65",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-66",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-67",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-68",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-69",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-70",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-71",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-72",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-73",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-74",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-75",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-76",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-77",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-78",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-79",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-80",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-81",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-82",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-83",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-84",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-85",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-86",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-87",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-88",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-89",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-90",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-91",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-92",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-93",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-94",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-95",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-96",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-97",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-98",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-99",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-100",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-101",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-102",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-103",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-104",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-105",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-106",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-107",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-108",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-109",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-110",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-111",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-112",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-113",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-114",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-115",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-116",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-117",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-118",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-119",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-120",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-121",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-122",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-123",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-124",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-125",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-126",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-b-127",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-128",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-129",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-130",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-131",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-132",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-133",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-134",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-135",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-136",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-137",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-138",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-139",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-140",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-141",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-142",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-145",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-148",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-149",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-150",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-154",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-155",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-156",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-161",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-163",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-164",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-166",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-167",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-169",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-188",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-189",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-190",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   },
+   {
+    "id": "restart-1790377951-c-191",
+    "status": null,
+    "payload": "{\"error\":\"deadline exceeded\"}"
+   }
+  ]
+ },
+ "jobs": {
+  "a": {
+   "requests": 64,
+   "deadline_s": 45,
+   "objective": "batch",
+   "identical": 1,
+   "failed": {
+    "None": 63
+   },
+   "met_deadline": 1,
+   "p50_done_s": 13.1,
+   "last_done_s": 13.1
+  },
+  "b": {
+   "requests": 64,
+   "deadline_s": 75,
+   "objective": "batch",
+   "identical": 0,
+   "failed": {
+    "None": 64
+   },
+   "met_deadline": 0,
+   "p50_done_s": NaN,
+   "last_done_s": null
+  },
+  "c": {
+   "requests": 64,
+   "deadline_s": 100,
+   "objective": "batch",
+   "identical": 32,
+   "failed": {
+    "None": 32
+   },
+   "met_deadline": 32,
+   "p50_done_s": 97.9,
+   "last_done_s": 98.8
+  }
+ },
+ "interactive": {
+  "sent": 480,
+  "ok": 480,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 0.296,
+  "ttft_p95_s": 0.45,
+  "tokens": 93640
+ },
+ "decode": {
+  "vllm_generation_tokens": 520187.0,
+  "batch_decoded": 426547.0,
+  "batch_ideal": 288000,
+  "batch_redone": 138547.0,
+  "vllm_prompt_tokens": 22532.0,
+  "prefix_cache_hits": 9280.0,
+  "prefix_cache_queries": 22532.0
+ },
+ "processor": {
+  "request_resumes_total": 0.0,
+  "resumed_tokens_total": 0.0,
+  "request_retries_total": 480.0
+ },
+ "epp": {
+  "revocations_issued_total": 480.0,
+  "revocations_total": 480.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 581.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 480.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"EvictedContextCancelled\",priority=\"-1\"}": 23.0
+ }
+}

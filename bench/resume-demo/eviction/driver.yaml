@@ -1,0 +1,40 @@
+# In-cluster scenario driver: experiment.sh runs scenario.py here with
+# kubectl exec so no request goes through a port-forward.
+apiVersion: v1
+kind: Service
+metadata:
+  name: evict-vllm-pods
+  labels: {app.kubernetes.io/part-of: resume-poc}
+spec:
+  clusterIP: None
+  selector: {app: evict-vllm}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: evict-driver
+  labels: {app.kubernetes.io/part-of: resume-poc, app: evict-driver}
+spec:
+  containers:
+    - name: driver
+      image: docker.io/library/python:3.12-slim
+      command: ["sleep", "infinity"]
+      workingDir: /work
+      volumeMounts: [{name: work, mountPath: /work}]
+      resources:
+        requests: {cpu: "2", memory: 2Gi}
+        limits: {cpu: "4", memory: 4Gi}
+  volumes:
+    - {name: work, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: evict-processor
+  labels: {app.kubernetes.io/part-of: resume-poc}
+spec:
+  selector: {app: evict-processor}
+  ports:
+    - {name: api, port: 8080, targetPort: 8080}
+    - {name: metrics, port: 9090, targetPort: 9090}

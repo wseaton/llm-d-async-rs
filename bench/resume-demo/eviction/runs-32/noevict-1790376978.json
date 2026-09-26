@@ -1,0 +1,77 @@
+{
+ "run": "noevict-1790376978",
+ "batch": {
+  "requests": 192,
+  "max_tokens": 1500,
+  "identical": 192,
+  "failed": 0,
+  "makespan_s": 69.6,
+  "p50_done_s": 43.9,
+  "max_result_backlog": 0,
+  "mismatches": []
+ },
+ "jobs": {
+  "a": {
+   "requests": 64,
+   "deadline_s": 45,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 18.6,
+   "last_done_s": 22.2
+  },
+  "b": {
+   "requests": 64,
+   "deadline_s": 75,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 43.9,
+   "last_done_s": 53.2
+  },
+  "c": {
+   "requests": 64,
+   "deadline_s": 100,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 66.4,
+   "last_done_s": 69.6
+  }
+ },
+ "interactive": {
+  "sent": 480,
+  "ok": 480,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 1.473,
+  "ttft_p95_s": 6.529,
+  "tokens": 93640
+ },
+ "decode": {
+  "vllm_generation_tokens": 381640.0,
+  "batch_decoded": 288000.0,
+  "batch_ideal": 288000,
+  "batch_redone": 0.0,
+  "vllm_prompt_tokens": 11440.0,
+  "prefix_cache_hits": 3072.0,
+  "prefix_cache_queries": 11440.0
+ },
+ "processor": {
+  "request_resumes_total": 0.0,
+  "resumed_tokens_total": 0.0,
+  "request_retries_total": 0.0
+ },
+ "epp": {
+  "revocations_issued_total": 0.0,
+  "revocations_total": 0.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 192.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 480.0
+ }
+}

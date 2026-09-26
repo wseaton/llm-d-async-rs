@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evict-vllm
+  labels: {app.kubernetes.io/part-of: resume-poc, app: evict-vllm}
+spec:
+  replicas: REPLICAS
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: evict-vllm}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: resume-poc, app: evict-vllm}
+    spec:
+      containers:
+        - name: vllm
+          image: docker.io/vllm/vllm-openai:v0.30.0
+          command: ["vllm", "serve"]
+          args: ["MODEL", "--port", "8000", "--max-model-len", "8192",
+                 "--max-num-seqs", "SLOTS", "--enable-prompt-tokens-details", "--enable-scale-out",
+                 "--compilation-config",
+                 '{"inductor_compile_config":{"enable_auto_functionalized_v2":false,"combo_kernels":true,"benchmark_combo_kernel":false}}',
+                 "--kv-events-config",
+                 '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv@$(POD_IP):8000@MODEL"}']
+          env:
+            - {name: VLLM_BATCH_INVARIANT, value: "1"}
+            - {name: VLLM_TRITON_FORCE_FIRST_CONFIG, value: "1"}
+            - {name: VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE, value: "0"}
+            - {name: VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING, value: "0"}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports: [{containerPort: 8000}, {name: kv-events, containerPort: 5557}]
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "2", memory: 24Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "8", memory: 64Gi, nvidia.com/gpu: "1"}
+          volumeMounts: [{name: shm, mountPath: /dev/shm}]
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: evict-vllm
+  labels: {app.kubernetes.io/part-of: resume-poc}
+spec:
+  selector: {app: evict-vllm}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evict-processor
+  labels: {app.kubernetes.io/part-of: resume-poc}
+data:
+  transport.json: |
+    {"poll_interval_ms": 100, "queues": [
+      {"queue_name": "batch", "igw_base_url": "http://evict-epp:80",
+       "request_path_url": "/v1/completions", "inference_objective": "batch", "resumable": true}
+    ]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evict-processor
+  labels: {app.kubernetes.io/part-of: resume-poc, app: evict-processor}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: evict-processor}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: resume-poc, app: evict-processor}
+    spec:
+      imagePullSecrets: [{name: resume-poc-quay}]
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: processor
+          image: IMAGE
+          args:
+            - --data-dir=/data
+            - --transport-config-file=/config/transport.json
+            - --drain-timeout=3s
+            - --concurrency=256
+            - --request-timeout=30m
+          env:
+            - {name: RUST_LOG, value: "info,llm_d_async=debug"}
+          ports:
+            - {name: api, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+            - {name: metrics, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8081}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config}
+          resources:
+            requests: {cpu: "1", memory: 512Mi}
+            limits: {cpu: "4", memory: 2Gi}
+      volumes:
+        - {name: data, emptyDir: {}}
+        - {name: config, configMap: {name: evict-processor}}

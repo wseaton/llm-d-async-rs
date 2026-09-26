@@ -1,1 +1,4 @@
 /target
+__pycache__/
+# Token-ID baselines the eviction experiment regenerates per run.
+bench/resume-demo/eviction/runs*/baselines.json

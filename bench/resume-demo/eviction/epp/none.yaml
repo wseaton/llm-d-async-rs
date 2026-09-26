@@ -1,0 +1,25 @@
+# Load-aware routing only: no affinity for continuations.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: max-score-picker
+- type: inflight-load-producer
+- type: concurrency-detector
+  parameters: {concurrencyMode: requests, maxConcurrency: 32, headroom: 0.0}
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
+    weight: 2
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 2
+  - pluginRef: max-score-picker
+flowControl:
+  enableEviction: true
+  defaultRequestTTL: 900s
+  saturationDetector:
+    pluginRef: concurrency-detector

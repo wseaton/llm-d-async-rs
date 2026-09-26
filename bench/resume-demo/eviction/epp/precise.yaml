@@ -1,0 +1,53 @@
+# Prefix scoring from vLLM KV-cache events. Text prompts are rendered by vLLM
+# so they hash like the token-ID prompts of continuations.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: max-score-picker
+- type: inflight-load-producer
+- type: concurrency-detector
+  parameters: {concurrencyMode: requests, maxConcurrency: 32, headroom: 0.0}
+- type: token-producer
+  parameters:
+    modelName: MODEL
+    vllm: {url: "http://evict-vllm:8000"}
+- type: endpoint-notification-source
+- type: metrics-data-source
+- type: core-metrics-extractor
+- type: precise-prefix-cache-producer
+  parameters:
+    tokenProcessorConfig: {blockSize: 16}
+    indexerConfig:
+      kvBlockIndexConfig: {enableMetrics: true}
+    kvEventsConfig:
+      discoverPods: true
+      podDiscoveryConfig: {socketPort: 5557}
+- type: prefix-cache-scorer
+  parameters: {prefixMatchInfoProducerName: precise-prefix-cache-producer}
+dataLayer:
+  sources:
+  - pluginRef: metrics-data-source
+    extractors:
+    - pluginRef: core-metrics-extractor
+  - pluginRef: endpoint-notification-source
+    extractors:
+    - pluginRef: precise-prefix-cache-producer
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
+    weight: 2
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 2
+  - pluginRef: prefix-cache-scorer
+    weight: 3
+  - pluginRef: max-score-picker
+flowControl:
+  enableEviction: true
+  defaultRequestTTL: 900s
+  saturationDetector:
+    pluginRef: concurrency-detector

@@ -1,0 +1,33 @@
+# Continuations prefer the endpoint their session (x-session-id) last ran on.
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+featureGates:
+- flowControl
+plugins:
+- type: queue-scorer
+- type: kv-cache-utilization-scorer
+- type: max-score-picker
+- type: inflight-load-producer
+- type: concurrency-detector
+  parameters: {concurrencyMode: requests, maxConcurrency: 32, headroom: 0.0}
+- type: session-affinity-scorer
+  parameters:
+    strategy: session_id
+    sessionIdConfig:
+      sources: [{header: x-session-id}]
+      evictionTtlSeconds: 3600
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: queue-scorer
+    weight: 2
+  - pluginRef: kv-cache-utilization-scorer
+    weight: 2
+  - pluginRef: session-affinity-scorer
+    weight: 3
+  - pluginRef: max-score-picker
+flowControl:
+  enableEviction: true
+  defaultRequestTTL: 900s
+  saturationDetector:
+    pluginRef: concurrency-detector

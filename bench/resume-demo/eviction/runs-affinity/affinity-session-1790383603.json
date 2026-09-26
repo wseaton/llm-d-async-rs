@@ -1,0 +1,104 @@
+{
+ "run": "affinity-session-1790383603",
+ "batch": {
+  "requests": 768,
+  "max_tokens": 1500,
+  "identical": 768,
+  "failed": 0,
+  "makespan_s": 97.5,
+  "p50_done_s": 67.5,
+  "max_result_backlog": 50,
+  "submit_s": 0.24,
+  "mismatches": []
+ },
+ "jobs": {
+  "a": {
+   "requests": 256,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 256,
+   "failed": {},
+   "met_deadline": 256,
+   "p50_done_s": 67.0,
+   "last_done_s": 85.7
+  },
+  "b": {
+   "requests": 256,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 256,
+   "failed": {},
+   "met_deadline": 256,
+   "p50_done_s": 57.1,
+   "last_done_s": 83.8
+  },
+  "c": {
+   "requests": 256,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 256,
+   "failed": {},
+   "met_deadline": 256,
+   "p50_done_s": 72.4,
+   "last_done_s": 97.5
+  }
+ },
+ "interactive": {
+  "sent": 1920,
+  "ok": 1920,
+  "statuses": [
+   200
+  ],
+  "ttft_p50_s": 0.798,
+  "ttft_p95_s": 1.599,
+  "tokens": 374560
+ },
+ "decode": {
+  "vllm_generation_tokens": 1526960.0,
+  "batch_decoded": 1152400.0,
+  "batch_ideal": 1152000,
+  "batch_redone": 400.0,
+  "vllm_prompt_tokens": 1306463.0,
+  "prefix_cache_hits": 1260320.0,
+  "prefix_cache_queries": 1307334.0
+ },
+ "pods": {
+  "evict-vllm-5cf5448d45-7ppkm": {
+   "generation_tokens": 386149.0,
+   "prompt_tokens": 388498.0,
+   "prefix_cache_hits": 376944.0,
+   "prefix_cache_queries": 388528.0
+  },
+  "evict-vllm-5cf5448d45-jxtbx": {
+   "generation_tokens": 367166.0,
+   "prompt_tokens": 324886.0,
+   "prefix_cache_hits": 314128.0,
+   "prefix_cache_queries": 325496.0
+  },
+  "evict-vllm-5cf5448d45-k9vpp": {
+   "generation_tokens": 381283.0,
+   "prompt_tokens": 279771.0,
+   "prefix_cache_hits": 267888.0,
+   "prefix_cache_queries": 280002.0
+  },
+  "evict-vllm-5cf5448d45-q647m": {
+   "generation_tokens": 392362.0,
+   "prompt_tokens": 313308.0,
+   "prefix_cache_hits": 301360.0,
+   "prefix_cache_queries": 313308.0
+  }
+ },
+ "processor": {
+  "request_resumes_total": 1316.0,
+  "resumed_tokens_total": 796377.0,
+  "request_retries_total": 98.0
+ },
+ "epp": {
+  "revocations_issued_total": 1414.0,
+  "revocations_total": 1414.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 2182.0,
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"10\"}": 1920.0
+ }
+}

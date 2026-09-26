@@ -1,0 +1,55 @@
+# helm install evict <llm-d-router v0.10.0>/config/charts/llm-d-router-standalone -f router-values.yaml
+router:
+  epp:
+    image: {tag: v0.10.0, pullPolicy: IfNotPresent}
+    flags:
+      v: 2
+    resources:
+      requests: {cpu: "2", memory: 2Gi}
+      limits: {memory: 4Gi}
+    pluginsConfigFile: eviction.yaml
+    pluginsCustomConfig:
+      eviction.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        featureGates:
+        - flowControl
+        plugins:
+        - type: queue-scorer
+        - type: max-score-picker
+        - type: inflight-load-producer
+        - type: concurrency-detector
+          parameters:
+            concurrencyMode: requests
+            maxConcurrency: 4
+            headroom: 0.0
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+          - pluginRef: max-score-picker
+        flowControl:
+          enableEviction: true
+          defaultRequestTTL: 900s
+          saturationDetector:
+            pluginRef: concurrency-detector
+  modelServers:
+    matchLabels: {app: evict-vllm}
+    targetPorts: [{number: 8000}]
+    protocol: http
+  inferencePool:
+    failureMode: FailClose
+  inferenceObjectives:
+  - {name: batch, priority: -1}
+  - {name: batch-2, priority: -2}
+  - {name: batch-3, priority: -3}
+  - {name: interactive, priority: 10}
+  extraServicePorts:
+  - {name: http, port: 80, protocol: TCP, targetPort: 8081}
+  monitoring:
+    prometheus: {enabled: false, auth: {enabled: false}}
+  proxy:
+    failOpen: false
+    resources:
+      requests: {cpu: "2", memory: 1Gi}
+      limits: {memory: 4Gi}

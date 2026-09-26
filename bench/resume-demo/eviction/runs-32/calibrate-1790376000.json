@@ -1,0 +1,73 @@
+{
+ "run": "calibrate-1790376000",
+ "batch": {
+  "requests": 192,
+  "max_tokens": 1500,
+  "identical": 192,
+  "failed": 0,
+  "makespan_s": 63.3,
+  "p50_done_s": 37.4,
+  "mismatches": []
+ },
+ "jobs": {
+  "a": {
+   "requests": 64,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 18.7,
+   "last_done_s": 28.0
+  },
+  "b": {
+   "requests": 64,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 37.4,
+   "last_done_s": 44.6
+  },
+  "c": {
+   "requests": 64,
+   "deadline_s": 1800,
+   "objective": "batch",
+   "identical": 64,
+   "failed": {},
+   "met_deadline": 64,
+   "p50_done_s": 56.1,
+   "last_done_s": 63.3
+  }
+ },
+ "interactive": {
+  "sent": 0,
+  "ok": 0,
+  "statuses": [],
+  "ttft_p50_s": NaN,
+  "ttft_p95_s": NaN,
+  "tokens": 0
+ },
+ "decode": {
+  "vllm_generation_tokens": 288000.0,
+  "batch_decoded": 288000.0,
+  "batch_ideal": 288000,
+  "batch_redone": 0.0,
+  "vllm_prompt_tokens": 5480.0,
+  "prefix_cache_hits": 3072.0,
+  "prefix_cache_queries": 5480.0
+ },
+ "processor": {
+  "request_resumes_total": 0.0,
+  "resumed_tokens_total": 0.0,
+  "request_retries_total": 0.0
+ },
+ "epp": {
+  "revocations_issued_total": 0.0,
+  "revocations_total": 0.0
+ },
+ "epp_outcomes": {
+  "llm_d_epp_flow_control_requests_total{inference_pool=\"evict\",outcome=\"Dispatched\",priority=\"-1\"}": 192.0
+ }
+}
