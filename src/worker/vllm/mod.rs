@@ -1053,6 +1053,44 @@ mod tests {
     }
 
     #[test]
+    fn derender_sees_a_stopped_generation_without_its_stop_token() {
+        let sent = |finish: &str, tokens: &[u32]| {
+            let generated = Generated {
+                prompt_token_ids: vec![1, 2],
+                token_ids: tokens.to_vec(),
+                finish_reason: finish.into(),
+                prompt_tokens_details: None,
+            };
+            let body =
+                derender::request(Api::Chat, &generated, "x", br#"{"messages":[]}"#).unwrap();
+            json_of(&body)["generate_response"]["choices"][0]["token_ids"].clone()
+        };
+        assert_eq!(sent("stop", &[7, 8, 9]), json!([7, 8]));
+        assert_eq!(sent("length", &[7, 8, 9]), json!([7, 8, 9]));
+        assert_eq!(sent("stop", &[9]), json!([9]), "derender needs a token");
+
+        let chat = json!({"id": "x", "choices": [{"index": 0, "finish_reason": "stop",
+                          "message": {"role": "assistant", "content": "hi"}}],
+                          "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}});
+        let generated = Generated {
+            prompt_token_ids: vec![1, 2],
+            token_ids: vec![7, 8, 9],
+            finish_reason: "stop".into(),
+            prompt_tokens_details: None,
+        };
+        let out = json_of(
+            derender::response(CHAT, chat.to_string().as_bytes(), generated)
+                .unwrap()
+                .as_bytes(),
+        );
+        assert_eq!(
+            out["usage"]["completion_tokens"], 3,
+            "the stop token counts"
+        );
+        assert_eq!(out["usage"]["total_tokens"], 5);
+    }
+
+    #[test]
     fn cached_tokens_are_capped_at_the_callers_prompt() {
         let chat = json!({"id": "x", "choices": [{"index": 0, "finish_reason": "stop",
                           "message": {"role": "assistant", "content": "hi"}}],

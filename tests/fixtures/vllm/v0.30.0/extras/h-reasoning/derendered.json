@@ -1,7 +1,7 @@
 {
   "id": "gen-h-reasoning",
   "object": "chat.completion",
-  "created": 1790428540,
+  "created": 1790441236,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -26,8 +26,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 42,
-    "total_tokens": 64,
-    "completion_tokens": 22,
+    "total_tokens": 63,
+    "completion_tokens": 21,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

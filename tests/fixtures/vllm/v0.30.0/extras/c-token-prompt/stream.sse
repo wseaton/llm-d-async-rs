@@ -1,10 +1,10 @@
-data: {"id":"cmpl-ab614cd6d56e8038","object":"text_completion","created":1790428527,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" understood","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,34668,2268,14739,13,576,19827,5823,419,9929,438,264,1140,315,3950,14142,4751,1091,438,1467,11,773,279,45375,1969,10701,3950,2022,1588,25],"token_ids":[15972]}]}
+data: {"id":"cmpl-add196808fd8ca68","object":"text_completion","created":1790441223,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" understood","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,34668,2268,14739,13,576,19827,5823,419,9929,438,264,1140,315,3950,14142,4751,1091,438,1467,11,773,279,45375,1969,10701,3950,2022,1588,25],"token_ids":[15972]}]}
 
-data: {"id":"cmpl-ab614cd6d56e8038","object":"text_completion","created":1790428527,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":".","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[13]}]}
+data: {"id":"cmpl-add196808fd8ca68","object":"text_completion","created":1790441223,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":".","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[13]}]}
 
-data: {"id":"cmpl-ab614cd6d56e8038","object":"text_completion","created":1790428527,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"","logprobs":null,"finish_reason":"stop","stop_reason":null,"prompt_token_ids":null,"token_ids":[151329]}]}
+data: {"id":"cmpl-add196808fd8ca68","object":"text_completion","created":1790441223,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"","logprobs":null,"finish_reason":"stop","stop_reason":null,"prompt_token_ids":null,"token_ids":[151329]}]}
 
-data: {"id":"cmpl-ab614cd6d56e8038","object":"text_completion","created":1790428527,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":31,"total_tokens":34,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":0}},"system_fingerprint":"vllm-fixture-0.30.0","metrics":{"generation_time_ms":20.111083984375,"mean_itl_ms":10.0555419921875}}
+data: {"id":"cmpl-add196808fd8ca68","object":"text_completion","created":1790441223,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":31,"total_tokens":34,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":0}},"system_fingerprint":"vllm-fixture-0.30.0","metrics":{"generation_time_ms":21.19302749633789,"mean_itl_ms":10.596513748168945}}
 
 data: [DONE]
 

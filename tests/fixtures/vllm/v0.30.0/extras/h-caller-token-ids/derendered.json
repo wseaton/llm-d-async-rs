@@ -1,7 +1,7 @@
 {
   "id": "gen-h-caller-token-ids",
   "object": "chat.completion",
-  "created": 1790428542,
+  "created": 1790441238,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -26,8 +26,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 44,
-    "total_tokens": 58,
-    "completion_tokens": 14,
+    "total_tokens": 57,
+    "completion_tokens": 13,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

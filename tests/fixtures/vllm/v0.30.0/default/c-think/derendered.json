@@ -1,7 +1,7 @@
 {
   "id": "gen-c-think",
   "object": "text_completion",
-  "created": 1790428505,
+  "created": 1790441200,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -20,8 +20,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 27,
-    "total_tokens": 46,
-    "completion_tokens": 19,
+    "total_tokens": 45,
+    "completion_tokens": 18,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

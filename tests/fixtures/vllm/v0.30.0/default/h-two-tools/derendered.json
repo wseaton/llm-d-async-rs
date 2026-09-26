@@ -1,7 +1,7 @@
 {
   "id": "gen-h-two-tools",
   "object": "chat.completion",
-  "created": 1790428506,
+  "created": 1790441201,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -15,7 +15,7 @@
         "function_call": null,
         "tool_calls": [
           {
-            "id": "b7269d834e423196",
+            "id": "bab0702db168337a",
             "type": "function",
             "function": {
               "name": "get_weather",
@@ -23,7 +23,7 @@
             }
           },
           {
-            "id": "93eccbccafd83e7e",
+            "id": "a75114937765a887",
             "type": "function",
             "function": {
               "name": "get_time",
@@ -44,8 +44,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 262,
-    "total_tokens": 298,
-    "completion_tokens": 36,
+    "total_tokens": 297,
+    "completion_tokens": 35,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

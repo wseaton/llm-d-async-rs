@@ -1,7 +1,7 @@
 {
   "id": "gen-h-no-thinking",
   "object": "chat.completion",
-  "created": 1790428540,
+  "created": 1790441236,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -26,8 +26,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 41,
-    "total_tokens": 49,
-    "completion_tokens": 8,
+    "total_tokens": 48,
+    "completion_tokens": 7,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

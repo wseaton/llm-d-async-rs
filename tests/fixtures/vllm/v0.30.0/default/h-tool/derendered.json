@@ -1,7 +1,7 @@
 {
   "id": "gen-h-tool",
   "object": "chat.completion",
-  "created": 1790428505,
+  "created": 1790441201,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -15,7 +15,7 @@
         "function_call": null,
         "tool_calls": [
           {
-            "id": "9b3679dac6fb0987",
+            "id": "a2ddcd371fac9ea2",
             "type": "function",
             "function": {
               "name": "get_weather",
@@ -36,8 +36,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 197,
-    "total_tokens": 223,
-    "completion_tokens": 26,
+    "total_tokens": 222,
+    "completion_tokens": 25,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

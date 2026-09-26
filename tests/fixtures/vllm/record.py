@@ -654,9 +654,12 @@ def record_token_layer(server: Server, plans: dict[str, dict], out_root: Path, c
         if status != 200 or not ctype.startswith("text/event-stream"):
             raise SystemExit(f"{name}: generate returned {status} {ctype}: {stream[:400]!r}")
         output, finish = generated_tokens(stream)
+        # The final token of a stopped generation is the stop token, which the
+        # non-streamed endpoint leaves out of the text; derender would not.
+        decoded = output[:-1] if finish == "stop" and len(output) > 1 else output
         response = {
             "request_id": f"gen-{name}",
-            "choices": [{"index": 0, "token_ids": output, "finish_reason": finish}],
+            "choices": [{"index": 0, "token_ids": decoded, "finish_reason": finish}],
         }
         tokens = len(prompt["token_ids"])
         if endpoint == "/v1/completions":

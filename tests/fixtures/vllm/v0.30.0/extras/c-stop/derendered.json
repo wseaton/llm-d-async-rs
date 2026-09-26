@@ -1,7 +1,7 @@
 {
   "id": "gen-c-stop",
   "object": "text_completion",
-  "created": 1790428539,
+  "created": 1790441235,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -20,8 +20,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 25,
-    "total_tokens": 28,
-    "completion_tokens": 3,
+    "total_tokens": 27,
+    "completion_tokens": 2,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

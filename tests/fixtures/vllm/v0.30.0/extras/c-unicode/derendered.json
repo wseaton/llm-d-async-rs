@@ -1,7 +1,7 @@
 {
   "id": "gen-c-unicode",
   "object": "text_completion",
-  "created": 1790428540,
+  "created": 1790441235,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -20,8 +20,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 27,
-    "total_tokens": 56,
-    "completion_tokens": 29,
+    "total_tokens": 55,
+    "completion_tokens": 28,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

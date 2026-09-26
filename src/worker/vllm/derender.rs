@@ -49,6 +49,18 @@ pub fn response_id(api: Api) -> String {
     format!("{prefix}-{:016x}", rand::random::<u64>())
 }
 
+/// The output tokens derender decodes: without the final token when the
+/// generation stopped, since that is the model's stop token, which the
+/// non-streamed endpoint leaves out of the text and derender would not.
+/// Eligible requests carry no stop strings or stop token IDs, so `stop` always
+/// ends on one. A lone stop token stays, as derender needs a token.
+fn decoded_tokens(generated: &Generated) -> &[u32] {
+    match generated.token_ids.split_last() {
+        Some((_, rest)) if generated.finish_reason == "stop" && !rest.is_empty() => rest,
+        _ => &generated.token_ids,
+    }
+}
+
 /// The body that asks vLLM to derender `generated`, the output of the
 /// caller's request `payload`, as the response `id`.
 pub fn request(
@@ -62,7 +74,7 @@ pub fn request(
         request_id: id,
         choices: [GenerateChoice {
             index: 0,
-            token_ids: &generated.token_ids,
+            token_ids: decoded_tokens(generated),
             finish_reason: &generated.finish_reason,
         }],
     };
@@ -125,7 +137,8 @@ pub enum Underendered {
 /// The response the caller's non-streamed request would have got, from
 /// vLLM's derender of `generated`: tool call IDs in the endpoint's form,
 /// `tool_calls` as the finish reason when the output called tools, the
-/// token IDs when the caller asked for them, and the prompt token details the
+/// token IDs when the caller asked for them, the completion token count
+/// including the stop token derender did not see, the prompt token details the
 /// generate stream reported, cached tokens capped at the caller's prompt (a
 /// continuation's prompt includes saved output). The reasoning token count
 /// and the stop reason stay null: derender reports neither.
@@ -145,6 +158,16 @@ pub fn response(
             call.id = format!("chatcmpl-tool-{:016x}", rand::random::<u64>());
         }
         choice.finish_reason = Some("tool_calls".to_owned());
+    }
+    if let Some(usage) = response
+        .rest
+        .get_mut("usage")
+        .and_then(Value::as_object_mut)
+    {
+        let prompt = generated.prompt_token_ids.len() as u64;
+        let completion = generated.token_ids.len() as u64;
+        usage.insert("completion_tokens".into(), completion.into());
+        usage.insert("total_tokens".into(), (prompt + completion).into());
     }
     if let Some(mut details) = generated.prompt_tokens_details.clone() {
         let prompt = generated.prompt_token_ids.len() as u64;

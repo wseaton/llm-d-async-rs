@@ -1,10 +1,10 @@
-data: {"id":"cmpl-b78b7f5e9fdb125c","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" fir","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,40980,30756,13,61105,264,2805,17114,11,1221,279,11129,3409,11,1221,1045,803,1467,429,279,19827,374,3601,311,2581,1490,25],"token_ids":[1156]}]}
+data: {"id":"cmpl-a94d80dcf687080f","object":"text_completion","created":1790441187,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" fir","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,40980,30756,13,61105,264,2805,17114,11,1221,279,11129,3409,11,1221,1045,803,1467,429,279,19827,374,3601,311,2581,1490,25],"token_ids":[1156]}]}
 
-data: {"id":"cmpl-b78b7f5e9fdb125c","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"st pa","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[949]}]}
+data: {"id":"cmpl-a94d80dcf687080f","object":"text_completion","created":1790441187,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"st pa","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[949]}]}
 
-data: {"id":"cmpl-b78b7f5e9fdb125c","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"rt ","logprobs":null,"finish_reason":"stop","stop_reason":"END","prompt_token_ids":null,"token_ids":[11171]}]}
+data: {"id":"cmpl-a94d80dcf687080f","object":"text_completion","created":1790441187,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"rt ","logprobs":null,"finish_reason":"stop","stop_reason":"END","prompt_token_ids":null,"token_ids":[11171]}]}
 
-data: {"id":"cmpl-b78b7f5e9fdb125c","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":28,"total_tokens":31,"completion_tokens":3},"system_fingerprint":"vllm-0.30.0-8259f3cd"}
+data: {"id":"cmpl-a94d80dcf687080f","object":"text_completion","created":1790441187,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":28,"total_tokens":31,"completion_tokens":3},"system_fingerprint":"vllm-0.30.0-8259f3cd"}
 
 data: [DONE]
 

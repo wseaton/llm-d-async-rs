@@ -1,7 +1,7 @@
 {
   "id": "gen-h-default-limit",
   "object": "chat.completion",
-  "created": 1790428507,
+  "created": 1790441202,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -26,8 +26,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 41,
-    "total_tokens": 54,
-    "completion_tokens": 13,
+    "total_tokens": 53,
+    "completion_tokens": 12,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },

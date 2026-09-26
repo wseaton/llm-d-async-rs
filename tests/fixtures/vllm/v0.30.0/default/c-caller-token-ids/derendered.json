@@ -1,7 +1,7 @@
 {
   "id": "gen-c-caller-token-ids",
   "object": "text_completion",
-  "created": 1790428504,
+  "created": 1790441199,
   "model": "zai-org/GLM-4.7",
   "choices": [
     {
@@ -20,8 +20,8 @@
   "system_fingerprint": null,
   "usage": {
     "prompt_tokens": 28,
-    "total_tokens": 31,
-    "completion_tokens": 3,
+    "total_tokens": 30,
+    "completion_tokens": 2,
     "prompt_tokens_details": null,
     "completion_tokens_details": null
   },
