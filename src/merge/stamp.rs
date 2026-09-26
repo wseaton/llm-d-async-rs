@@ -61,7 +61,7 @@ mod tests {
             igw_base_url: "http://gw".into(),
             request_path: "/v1/completions".into(),
             inference_objective: objective.into(),
-            render_url: None,
+            resume: None,
         }
     }
 

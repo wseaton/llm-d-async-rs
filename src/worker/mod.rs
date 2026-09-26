@@ -177,9 +177,9 @@ impl Worker {
             labels,
             claim_id: guard.claim_id(),
             payload,
-            resuming: source.render_url.as_deref().map(|render_url| Resuming {
+            resuming: source.resume.as_ref().map(|target| Resuming {
                 igw_base_url: &source.igw_base_url,
-                render_url,
+                target,
             }),
         };
         let end = self.decide(&mut envelope, &mut dispatching).await;
@@ -805,7 +805,7 @@ mod tests {
                     igw_base_url: String::new(),
                     request_path: String::new(),
                     inference_objective: String::new(),
-                    render_url: None,
+                    resume: None,
                 }),
                 url: url.into(),
                 headers: Headers::default(),

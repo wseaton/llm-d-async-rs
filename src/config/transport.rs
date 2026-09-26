@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
+use reqwest::header::HeaderValue;
 use serde::Deserialize;
 
 use crate::api::routing::RESERVED_ROUTE_PREFIX;
@@ -65,6 +66,34 @@ pub struct QueueConfig {
     /// renders and derenders a resumable queue's requests.
     #[serde(default)]
     pub render_url: Option<String>,
+    /// Sent as `EPP-Profile` on a resumable queue's generate requests, naming
+    /// the EPP scheduling profile that picks their pod.
+    #[serde(default)]
+    pub generate_epp_profile: Option<EppProfile>,
+}
+
+/// An EPP scheduling profile name.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+pub struct EppProfile(HeaderValue);
+
+impl EppProfile {
+    pub fn header_value(&self) -> &HeaderValue {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for EppProfile {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        if name.is_empty() {
+            return Err("an EPP profile must not be empty".into());
+        }
+        HeaderValue::try_from(name)
+            .map(Self)
+            .map_err(|e| format!("an EPP profile must be a header value: {e}"))
+    }
 }
 
 impl QueueConfig {
@@ -150,6 +179,12 @@ impl TransportConfig {
             {
                 return invalid(format!("queue {:?}: render_url: {e}", q.queue_name));
             }
+            if q.generate_epp_profile.is_some() && !q.resumable {
+                return invalid(format!(
+                    "queue {:?}: only a resumable queue takes a generate_epp_profile",
+                    q.queue_name
+                ));
+            }
             if pools.get(&q.worker_pool_id).is_none() {
                 return invalid(format!(
                     "queue {:?}: worker pool {:?} not found in pool configuration",
@@ -168,7 +203,8 @@ impl TransportConfig {
 #[cfg(test)]
 mod tests {
     use crate::config::pools::{WorkerPoolConfig, WorkerPools};
-    use crate::config::transport::TransportConfig;
+    use crate::config::transport::{EppProfile, TransportConfig};
+    use reqwest::header::HeaderValue;
 
     fn pools() -> WorkerPools {
         WorkerPools::new(vec![
@@ -209,6 +245,21 @@ mod tests {
             cfg.queues[0].render_url.as_deref(),
             Some("http://render:8000")
         );
+        assert_eq!(cfg.queues[0].generate_epp_profile, None);
+
+        let cfg = TransportConfig::parse(
+            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r","generate_epp_profile":"decode"}]}"#,
+            &pools(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.queues[0]
+                .generate_epp_profile
+                .as_ref()
+                .map(EppProfile::header_value),
+            Some(&HeaderValue::from_static("decode"))
+        );
 
         for (input, want) in [
             (
@@ -226,6 +277,18 @@ mod tests {
             (
                 r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r","tool_call_parser":"glm47"}]}"#,
                 "unknown field `tool_call_parser`",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","generate_epp_profile":"decode"}]}"#,
+                "only a resumable queue takes a generate_epp_profile",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r","generate_epp_profile":""}]}"#,
+                "an EPP profile must not be empty",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r","generate_epp_profile":"de\ncode"}]}"#,
+                "an EPP profile must be a header value",
             ),
         ] {
             let err = TransportConfig::parse(input.as_bytes(), &pools(), false).unwrap_err();
