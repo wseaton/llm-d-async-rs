@@ -13,7 +13,6 @@ fn transport(gateway: &Gateway) -> Value {
     json!({"poll_interval_ms": 100, "queues": [{
         "queue_name": "r", "igw_base_url": gateway.url,
         "resumable": true, "render_url": gateway.url,
-        "generate_epp_profile": "decode",
     }]})
 }
 
@@ -67,19 +66,6 @@ async fn native(vllm: &Vllm, c: &Case) -> Value {
     serde_json::from_slice(&r.bytes().await.unwrap()).unwrap()
 }
 
-/// The `EPP-Profile` header of each forwarded request, in order.
-fn profiles(gateway: &Gateway) -> Vec<Option<String>> {
-    gateway
-        .forwarded()
-        .iter()
-        .map(|f| {
-            f.headers
-                .get("epp-profile")
-                .map(|v| v.to_str().unwrap().to_owned())
-        })
-        .collect()
-}
-
 async fn metric(p: &Processor, name: &str) -> f64 {
     p.metric(name, &[("queue_name", "r")]).await.unwrap_or(0.0)
 }
@@ -122,11 +108,6 @@ async fn resumable_queues_against_real_vllm() {
         let generate = &gateway.forwarded_to(GENERATE)[0];
         assert_eq!(generate["token_ids"], json!(c.prompt_token_ids));
         assert_eq!(generate["stream"], true);
-        assert_eq!(
-            profiles(&gateway),
-            [None, Some("decode".to_owned()), None],
-            "only generate names the EPP profile"
-        );
     }
 
     // Evicted mid-generation: the continuation carries the saved tokens,
@@ -146,14 +127,6 @@ async fn resumable_queues_against_real_vllm() {
         );
         let budget = |s: &Value| s["sampling_params"]["max_tokens"].as_u64().unwrap();
         assert_eq!(budget(&sent[0]) - budget(&sent[1]), c.cut as u64);
-        assert_eq!(
-            profiles(&gateway)
-                .into_iter()
-                .filter(|p| p.is_some())
-                .count(),
-            2,
-            "the continuation names the EPP profile too"
-        );
     }
     let cuts: usize = cases.iter().map(|c| c.cut).sum();
     assert_eq!(
@@ -230,11 +203,6 @@ async fn resumable_queues_against_real_vllm() {
     let paths: Vec<String> = gateway.forwarded().into_iter().map(|f| f.path).collect();
     assert_eq!(paths, ["/v1/chat/completions"]);
     assert_eq!(gateway.forwarded()[0].body, seeded.request);
-    assert_eq!(
-        profiles(&gateway),
-        [None],
-        "a request sent as submitted is left to the gateway's routing"
-    );
 
     // A draining replica saves the output so far; the next one continues.
     gateway.clear();

@@ -162,7 +162,7 @@ Durations use Go syntax (`90s`, `1h30m`, `250ms`), so existing values carry over
       "result_queue_name": "", "result_ttl_seconds": 0,
       "labels": {"tier": "batch"},
       "gate_type": "quota", "gate_params": {"mode": "concurrency", "limit": 8},
-      "resumable": false, "render_url": null, "generate_epp_profile": null
+      "resumable": false, "render_url": null
     }
   ]
 }
@@ -259,12 +259,6 @@ derenders. Progress travels with the request, so a draining replica saves it
 and another continues, and a shed continuation is sent again. The generate
 request carries token IDs, so the gateway's prefix scorers see the same prompt
 on every attempt.
-
-`generate_epp_profile` sends generate requests with that `EPP-Profile` header.
-A gateway in front of the llm-d coordinator routes requests without one to the
-coordinator, which does not serve `/inference/v1/generate`; with
-`"generate_epp_profile": "decode"` they go to the EPP's decode profile instead.
-Requests sent as submitted, render and derender carry no profile.
 
 Only an inline JSON payload is eligible, and only when derender reproduces its
 response and a continuation samples the same way. These are sent as submitted:

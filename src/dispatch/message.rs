@@ -4,7 +4,6 @@ use std::time::Instant;
 use bytes::Bytes;
 
 use crate::api::request::InternalRequest;
-use crate::config::transport::EppProfile;
 use crate::dispatch::claim::ClaimGuard;
 use crate::gate::release::Releases;
 use crate::merge::headers::Headers;
@@ -28,15 +27,8 @@ pub struct SourceMeta {
     pub igw_base_url: String,
     pub request_path: String,
     pub inference_objective: String,
-    pub resume: Option<ResumeTarget>,
-}
-
-/// Where a resumable queue renders, and how it sends generate requests.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumeTarget {
-    /// A vLLM serving the queue's model with `--enable-scale-out`.
-    pub render_url: String,
-    pub generate_epp_profile: Option<EppProfile>,
+    /// The render server of a resumable queue.
+    pub render_url: Option<String>,
 }
 
 impl SourceMeta {
@@ -77,7 +69,7 @@ mod tests {
             igw_base_url: "http://gw:8000/".into(),
             request_path: "/v1/completions".into(),
             inference_objective: String::new(),
-            resume: None,
+            render_url: None,
         };
         let mut env = envelope("a", "t", "q", 1);
         assert_eq!(meta.url_for(&env), "http://gw:8000/v1/completions");

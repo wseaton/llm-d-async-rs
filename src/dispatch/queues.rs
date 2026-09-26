@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::transport::QueueConfig;
 use crate::dispatch::claim::OutcomeSender;
 use crate::dispatch::consumer::Consumer;
-use crate::dispatch::message::{ResumeTarget, SourceMeta};
+use crate::dispatch::message::SourceMeta;
 use crate::gate::factory::{GateConfigError, GateFactory};
 use crate::merge::{MergeHandle, Source, UnknownPool};
 use crate::store::Store;
@@ -152,20 +152,12 @@ impl Queues {
 
         for (config, labels, gate) in prepared {
             let (tx, rx) = mpsc::channel(1);
-            let resume = config
-                .render_url
-                .clone()
-                .filter(|_| config.resumable)
-                .map(|render_url| ResumeTarget {
-                    render_url,
-                    generate_epp_profile: config.generate_epp_profile.clone(),
-                });
             let meta = Arc::new(SourceMeta {
                 labels: labels.clone(),
                 igw_base_url: config.igw_base_url.clone(),
                 request_path: config.request_path_url.clone(),
                 inference_objective: config.inference_objective.clone(),
-                resume,
+                render_url: config.render_url.clone().filter(|_| config.resumable),
             });
             self.merge
                 .add(&config.worker_pool_id, Source { meta, rx })?;

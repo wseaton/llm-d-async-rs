@@ -3,23 +3,22 @@
 //! `/inference/v1/generate`, and the render server derenders the output.
 
 use bytes::Bytes;
-use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::header::HeaderMap;
 
 use crate::api::progress::Progress;
-use crate::dispatch::message::ResumeTarget;
 use crate::worker::client::{
     ClientError, ErrorCategory, InferenceClient, InferenceResponse, ResponseBody, stream_failed,
 };
 use crate::worker::vllm::{self, Api, Plan, StreamError, derender};
 
 const GENERATE_PATH: &str = "/inference/v1/generate";
-const EPP_PROFILE: HeaderName = HeaderName::from_static("epp-profile");
 
 /// A resumable queue's settings.
 #[derive(Debug, Clone, Copy)]
 pub struct Resuming<'a> {
     pub igw_base_url: &'a str,
-    pub target: &'a ResumeTarget,
+    /// A vLLM serving the queue's model with `--enable-scale-out`.
+    pub render_url: &'a str,
 }
 
 fn join(base: &str, path: &str) -> String {
@@ -78,7 +77,7 @@ impl Resuming<'_> {
         }
         let rendered = client
             .post_json(
-                &join(&self.target.render_url, api.render_path()),
+                &join(self.render_url, api.render_path()),
                 headers.clone(),
                 body.to_vec(),
             )
@@ -108,14 +107,10 @@ impl Resuming<'_> {
     ) -> Result<InferenceResponse, Box<ClientError>> {
         let mut status = 200;
         if let Some(body) = plan.body.clone() {
-            let mut generate_headers = headers.clone();
-            if let Some(profile) = &self.target.generate_epp_profile {
-                generate_headers.insert(EPP_PROFILE, profile.header_value().clone());
-            }
             status = client
                 .send_streamed(
                     &join(self.igw_base_url, GENERATE_PATH),
-                    generate_headers,
+                    headers.clone(),
                     body,
                     &mut plan.reassembly,
                 )
@@ -131,7 +126,7 @@ impl Resuming<'_> {
             .map_err(|e| Box::new(stream_failed(StreamError::Malformed(e))))?;
         let derendered = client
             .post_json(
-                &join(&self.target.render_url, api.derender_path()),
+                &join(self.render_url, api.derender_path()),
                 headers,
                 request,
             )

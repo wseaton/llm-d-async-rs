@@ -125,7 +125,7 @@ mod tests {
                         igw_base_url: format!("http://{name}"),
                         request_path: "/v1/completions".into(),
                         inference_objective: String::new(),
-                        resume: None,
+                        render_url: None,
                     }),
                     rx,
                 })
