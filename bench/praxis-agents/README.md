@@ -7,17 +7,23 @@ piece belongs in.
 
 > [!IMPORTANT]
 > The Rust processor used here is experimental. It is a place to prove designs
-> (resume from saved tokens, results by request, the Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
+> (resume from saved tokens, results by request, the Postgres store) before
+> they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
 > What proves out is meant to be upstreamed and, where the project decides it
 > belongs, refactored back into the Go processor. It is not a supported
 > replacement for it.
 
-```text
- agent / SDK ──► Praxis AI ───────── foreground (interactive) ──────► llm-d-router ─────────────► vLLM
- Responses API   Responses ⇄ Chat                                     coordinator (optional),    render
-                 response store,  ── background ──► llm-d-async ────► EPP flow control,          generate
-                 background          (batch)        durable queues,   eviction, prefix routing   derender
-                 lifecycle                          resume from tokens
+```mermaid
+flowchart LR
+    agent["agent / SDK<br/>Responses API"] --> praxis["Praxis AI<br/>Responses ⇄ Chat<br/>response store"]
+    praxis -- "foreground<br/>interactive" --> router
+    praxis -- "background<br/>batch" --> async["llm-d-async<br/>durable queues<br/>resume from tokens"]
+    async -- "render / derender" --> vllm
+    async -- "generate<br/>(token IDs)" --> router
+    subgraph router ["llm-d-router"]
+        coord["coordinator<br/>(optional)"] --> epp["EPP<br/>flow control, eviction,<br/>prefix routing"]
+    end
+    router --> vllm["vLLM"]
 ```
 
 Foreground calls are `interactive`: flow control queues them by priority and
@@ -31,6 +37,47 @@ output. When flow control evicts a `batch` generation to make room for
 `interactive` work, the processor keeps the tokens it received and continues
 from prompt plus saved tokens once there is room again. The caller sees one
 uninterrupted response.
+
+```mermaid
+sequenceDiagram
+    participant P as llm-d-async
+    participant R as vLLM render
+    participant G as router (EPP)
+    participant V as vLLM
+    P->>R: render the request
+    R-->>P: prompt token IDs
+    P->>G: generate(prompt), batch
+    G->>V: forward
+    V-->>P: tokens t1 … tn (streamed)
+    Note over G: interactive work arrives,<br/>flow control evicts this stream
+    G--xP: stream cut
+    Note over P: keep t1 … tn, requeue
+    P->>G: generate(prompt + t1 … tn), budget − n
+    G->>V: forward
+    V-->>P: tokens tn+1 … (to the end)
+    P->>R: derender all output tokens
+    R-->>P: the caller's response
+```
+
+Background responses follow the OpenAI background contract; Praxis keeps the
+response record and llm-d-async runs the work:
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant X as Praxis AI
+    participant P as llm-d-async
+    C->>X: POST /v1/responses {background: true}
+    X->>P: submit (batch, result by request)
+    X-->>C: queued
+    C->>X: GET /v1/responses/{id}
+    X->>P: status / claim result
+    X-->>C: in_progress
+    Note over P: runs, maybe evicted and resumed
+    C->>X: GET /v1/responses/{id}
+    X->>P: claim result, acknowledge
+    X-->>C: completed
+```
 
 ## Status (2026-09-26)
 
