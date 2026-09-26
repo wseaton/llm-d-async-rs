@@ -1,39 +1,42 @@
-//! Planning and sending resumable requests: a first attempt streams the
-//! caller's request; a completion continues from its saved tokens on the
-//! same endpoint; a chat request continues on `/inference/v1/generate` from
-//! the prompt vLLM renders for it, and vLLM derenders the whole output.
+//! Planning and sending resumable requests through vLLM's token layer: the
+//! queue's render server renders the caller's request, the gateway streams
+//! `/inference/v1/generate`, and the render server derenders the output.
 
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
 
 use crate::api::progress::Progress;
-use crate::clock::now_millis;
 use crate::worker::client::{
     ClientError, ErrorCategory, InferenceClient, InferenceResponse, ResponseBody, stream_failed,
 };
-use crate::worker::vllm::{self, Api, Finished, Plan, Target, ToolCallParser};
+use crate::worker::vllm::{self, Api, Plan, StreamError, derender};
 
-const RENDER_PATH: &str = "/v1/chat/completions/render";
-const DERENDER_PATH: &str = "/v1/chat/completions/derender";
 const GENERATE_PATH: &str = "/inference/v1/generate";
 
 /// A resumable queue's settings.
 #[derive(Debug, Clone, Copy)]
 pub struct Resuming<'a> {
     pub igw_base_url: &'a str,
-    pub tool_call_parser: Option<ToolCallParser>,
-    pub render_url: Option<&'a str>,
+    /// A vLLM serving the queue's model with `--enable-scale-out`.
+    pub render_url: &'a str,
 }
 
 fn join(base: &str, path: &str) -> String {
     format!("{}{path}", base.trim_end_matches('/'))
 }
 
+fn unusable(what: &str, e: impl std::fmt::Display) -> Box<ClientError> {
+    Box::new(ClientError::new(
+        ErrorCategory::Unknown,
+        format!("{what}: {e}"),
+    ))
+}
+
 impl Resuming<'_> {
-    /// How to stream `body`, the inline payload if the request has one, to
-    /// `url`, continuing `progress` when it can be continued and clearing it
-    /// when not. `None` sends the request as submitted. Fails, keeping
-    /// `progress`, only when rendering does.
+    /// How to send `body`, the inline payload if the request has one, to
+    /// `url` through the token layer, continuing `progress` when it can be
+    /// continued and clearing it when not. `None` sends the request as
+    /// submitted. Fails, keeping `progress`, only when rendering does.
     pub async fn plan(
         &self,
         client: &InferenceClient,
@@ -43,7 +46,7 @@ impl Resuming<'_> {
         progress: &mut Option<Progress>,
     ) -> Result<Option<Plan>, Box<ClientError>> {
         let planned = self
-            .plan_inner(client, url, headers, body, progress)
+            .plan_inner(client, url, headers, body, progress.as_ref())
             .await?;
         if !planned.as_ref().is_some_and(|p| p.resumed) {
             *progress = None;
@@ -57,93 +60,79 @@ impl Resuming<'_> {
         url: &str,
         headers: &HeaderMap,
         body: Option<&Bytes>,
-        progress: &Option<Progress>,
+        progress: Option<&Progress>,
     ) -> Result<Option<Plan>, Box<ClientError>> {
-        let Some(body) = body else {
+        let (Some(body), Some(api)) = (body, Api::from_url(url)) else {
             return Ok(None);
         };
-        let Some(api) = Api::from_url(url) else {
-            return Ok(None);
-        };
-        if api == Api::Chat
-            && let (Some(saved), Some(render_url)) = (progress, self.render_url)
-        {
-            let rendered = client
-                .post_json(
-                    &join(render_url, RENDER_PATH),
-                    headers.clone(),
-                    body.to_vec(),
-                )
-                .await?;
-            match vllm::continue_chat(&rendered, saved, body) {
-                Ok(plan) => return Ok(Some(plan)),
-                Err(reason) => tracing::info!(%reason, "restarting the chat generation"),
+        let caller = match vllm::check(api, body) {
+            Ok(caller) => caller,
+            Err(reason) => {
+                tracing::debug!(%reason, "sending as submitted");
+                return Ok(None);
             }
+        };
+        if let Some(plan) = progress.and_then(|p| Plan::finished(caller, p)) {
+            return Ok(Some(plan));
         }
-        Ok(vllm::plan(
-            api,
-            self.tool_call_parser,
-            self.render_url.is_some(),
-            body,
-            progress.as_ref(),
-        )
-        .inspect_err(|reason| tracing::debug!(%reason, "sending without streaming"))
-        .ok())
+        let rendered = client
+            .post_json(
+                &join(self.render_url, api.render_path()),
+                headers.clone(),
+                body.to_vec(),
+            )
+            .await?;
+        let planned =
+            Plan::generate(caller, &rendered, progress).map_err(|e| unusable("render", e))?;
+        Ok(Some(match planned {
+            Ok(plan) => plan,
+            Err(reason) => {
+                tracing::info!(%reason, "restarting the generation");
+                Plan::generate(caller, &rendered, None)
+                    .map_err(|e| unusable("render", e))?
+                    .map_err(|e| unusable("render", e))?
+            }
+        }))
     }
 
     /// Sends `plan` and returns the response the caller's non-streamed
-    /// request would have got. `chat_request` is the caller's body, which a
-    /// continued chat generation is derendered against.
+    /// request `payload` would have got. On failure `plan` keeps the output
+    /// so far, finished or not.
     pub async fn send(
         &self,
         client: &InferenceClient,
-        url: &str,
         headers: HeaderMap,
         plan: &mut Plan,
-        chat_request: &Bytes,
+        payload: &Bytes,
     ) -> Result<InferenceResponse, Box<ClientError>> {
-        let target = match plan.target {
-            Target::Request => url.to_owned(),
-            Target::Generate => join(self.igw_base_url, GENERATE_PATH),
-        };
-        let (status, finished) = client
-            .send_streamed(
-                &target,
-                headers.clone(),
-                plan.body.clone(),
-                &mut plan.reassembly,
+        let mut status = 200;
+        if let Some(body) = plan.body.clone() {
+            status = client
+                .send_streamed(
+                    &join(self.igw_base_url, GENERATE_PATH),
+                    headers.clone(),
+                    body,
+                    &mut plan.reassembly,
+                )
+                .await?;
+        }
+        let generated = plan
+            .reassembly
+            .finish()
+            .map_err(|e| Box::new(stream_failed(e)))?;
+        let api = plan.caller.api;
+        let id = derender::response_id(api);
+        let request = derender::request(api, &generated, &id, payload)
+            .map_err(|e| Box::new(stream_failed(StreamError::Malformed(e))))?;
+        let derendered = client
+            .post_json(
+                &join(self.render_url, api.derender_path()),
+                headers,
+                request,
             )
             .await?;
-        let json = match finished {
-            Finished::Response(json) => json,
-            Finished::Generated {
-                generated,
-                caller_token_ids,
-            } => {
-                let render_url = self.render_url.ok_or_else(|| {
-                    Box::new(ClientError::new(
-                        ErrorCategory::Unknown,
-                        "a continued chat generation needs the queue's render_url",
-                    ))
-                })?;
-                let id = format!("chatcmpl-{:016x}", rand::random::<u64>());
-                let request = vllm::chat::derender_request(&generated, &id, chat_request)
-                    .map_err(|e| Box::new(stream_failed(e.into())))?;
-                let derendered = client
-                    .post_json(&join(render_url, DERENDER_PATH), headers, request)
-                    .await?;
-                let created = u64::try_from(now_millis() / 1000).unwrap_or(0);
-                let response = vllm::chat::resumed_response(
-                    &derendered,
-                    id,
-                    created,
-                    generated,
-                    caller_token_ids,
-                )
-                .map_err(|e| Box::new(stream_failed(e)))?;
-                serde_json::to_string(&response).map_err(|e| Box::new(stream_failed(e.into())))?
-            }
-        };
+        let json = derender::response(plan.caller, &derendered, generated)
+            .map_err(|e| unusable("derender", e))?;
         Ok(InferenceResponse {
             status,
             body: ResponseBody::Inline(json),

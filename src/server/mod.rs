@@ -2,20 +2,22 @@
 
 pub mod admin;
 pub mod error;
+pub mod facade;
 pub mod health;
 pub mod requests;
 pub mod results;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post, put};
-use tokio::sync::Notify;
 
 use crate::dispatch::queues::Queues;
 use crate::store::Store;
+use crate::store::signal::ResultSignal;
 use crate::telemetry::metrics::Metrics;
 
 #[derive(Debug, Clone, Copy)]
@@ -35,14 +37,25 @@ pub struct AppState {
     pub queues: Arc<Queues>,
     pub metrics: Arc<Metrics>,
     /// Signalled whenever results are written.
-    pub results: Arc<Notify>,
+    pub results: Arc<ResultSignal>,
     pub limits: PayloadLimits,
     pub default_result_queue: String,
+    /// How long a result delivered by request stays when its queue sets no
+    /// result TTL.
+    pub request_result_ttl: Duration,
+    /// The deadline of a facade request that names none.
+    pub facade_timeout: Duration,
     pub ready: Arc<AtomicBool>,
 }
 
 pub fn api_router(state: AppState) -> Router {
+    let json_body = DefaultBodyLimit::max(state.limits.json_body);
     Router::new()
+        .route("/v1/chat/completions", post(facade::chat).layer(json_body))
+        .route(
+            "/v1/completions",
+            post(facade::completions).layer(json_body),
+        )
         .route(
             "/v1/requests",
             post(requests::submit).layer(DefaultBodyLimit::disable()),
@@ -52,6 +65,7 @@ pub fn api_router(state: AppState) -> Router {
             post(requests::submit_batch).layer(DefaultBodyLimit::disable()),
         )
         .route("/v1/requests/cancel", post(requests::cancel))
+        .route("/v1/requests/{id}", get(requests::status))
         .route("/v1/queues", get(requests::list_queues))
         .route("/v1/results/{route}/pop", post(results::pop))
         .route("/v1/results/{route}/claims", post(results::claim))

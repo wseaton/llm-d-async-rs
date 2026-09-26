@@ -1,0 +1,44 @@
+{
+  "generate_responses": [
+    {
+      "request_id": "gen-c-think",
+      "choices": [
+        {
+          "index": 0,
+          "token_ids": [
+            151350,
+            785,
+            19827,
+            6801,
+            264,
+            2805,
+            4226,
+            13,
+            13646,
+            432,
+            311,
+            825,
+            1555,
+            13,
+            151351,
+            13041,
+            1052,
+            0,
+            151329
+          ],
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "prompt_tokens": [
+    27
+  ],
+  "completion_request": {
+    "model": "zai-org/GLM-4.7",
+    "prompt": "Case c-think. Think inside think tags first and then give the answer, all as one raw completion with no chat template involved:",
+    "max_tokens": 64,
+    "temperature": 0,
+    "n": 1
+  }
+}

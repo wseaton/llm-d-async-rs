@@ -1,1 +1,58 @@
-{"id":"chatcmpl-h-two-tools","object":"chat.completion","created":1790366226,"model":"zai-org/GLM-4.7","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[{"id":"8eb85ccb0f086363","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}},{"id":"bc6316e24cf7262f","type":"function","function":{"name":"get_time","arguments":"{\"city\": \"Paris\"}"}}],"reasoning":"Two separate facts are needed, so both tools get called."},"logprobs":null,"finish_reason":"tool_calls","stop_reason":null,"token_ids":null,"routed_experts":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":262,"total_tokens":298,"completion_tokens":36,"prompt_tokens_details":null,"completion_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"prompt_text":null,"kv_transfer_params":null,"ec_transfer_params":null,"metrics":null}
+{
+  "id": "gen-h-two-tools",
+  "object": "chat.completion",
+  "created": 1790428541,
+  "model": "zai-org/GLM-4.7",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "acba047341e5e34c",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Paris\"}"
+            }
+          },
+          {
+            "id": "a9db25e45a2f2ed0",
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "arguments": "{\"city\": \"Paris\"}"
+            }
+          }
+        ],
+        "reasoning": "Two separate facts are needed, so both tools get called."
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 262,
+    "total_tokens": 298,
+    "completion_tokens": 36,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "prompt_logprobs": null,
+  "prompt_token_ids": null,
+  "prompt_text": null,
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}

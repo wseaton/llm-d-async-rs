@@ -105,9 +105,22 @@ impl Outcome {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Applied {
-    pub results_written: usize,
+    /// The route of every result written.
+    pub result_routes: Vec<String>,
     /// Outcomes dropped because their claim was no longer current.
     pub fenced: usize,
+}
+
+/// Where one generation of a request stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStatus {
+    /// Waiting in its queue, to be sent or sent again.
+    Queued,
+    /// Claimed by a worker.
+    InProgress,
+    /// Finished, or never submitted.
+    Done,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

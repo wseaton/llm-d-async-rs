@@ -89,11 +89,6 @@ pub struct Reply {
     /// Close the connection after `delay` without answering, as a model pod
     /// dying mid-generation does.
     pub die: bool,
-    /// Send the headers and body, then break the connection instead of
-    /// ending the body.
-    pub cut: bool,
-    /// Send the headers and body, then keep the body open.
-    pub stall: bool,
 }
 
 impl Reply {
@@ -106,8 +101,6 @@ impl Reply {
             delay: Duration::ZERO,
             hang: false,
             die: false,
-            cut: false,
-            stall: false,
         }
     }
 
@@ -134,22 +127,6 @@ impl Reply {
             hang: true,
             ..Self::json(200, json!(null))
         }
-    }
-
-    /// An event stream of `events`, each sent as one `data:` line.
-    pub fn sse(events: &[String]) -> Self {
-        let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
-        Self::bytes(200, "text/event-stream", body.into_bytes())
-    }
-
-    pub fn cut(mut self) -> Self {
-        self.cut = true;
-        self
-    }
-
-    pub fn stall(mut self) -> Self {
-        self.stall = true;
-        self
     }
 
     pub fn die_after(delay: Duration) -> Self {
@@ -217,27 +194,6 @@ async fn record(State(state): State<Arc<UpstreamState>>, request: Request) -> Re
     }
     for (k, v) in reply.headers {
         response = response.header(k, v);
-    }
-    if reply.stall {
-        use tokio_stream::StreamExt;
-        let body = tokio_stream::iter([Ok::<_, std::io::Error>(reply.body)])
-            .chain(tokio_stream::pending());
-        return response.body(Body::from_stream(body)).unwrap();
-    }
-    if reply.cut {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        tokio::spawn(async move {
-            let _ = tx.send(Ok(reply.body)).await;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = tx
-                .send(Err(std::io::Error::other("upstream cut the stream")))
-                .await;
-        });
-        return response
-            .body(Body::from_stream(
-                tokio_stream::wrappers::ReceiverStream::new(rx),
-            ))
-            .unwrap();
     }
     response.body(Body::from(reply.body)).unwrap()
 }

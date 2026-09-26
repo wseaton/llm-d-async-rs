@@ -12,7 +12,7 @@ use crate::store::blob::key::BlobKey;
 use crate::store::blob::read_all;
 use crate::store::queue::{
     AckOutcome, Admission, Admitted, ClaimRef, NewRequest, Outcome, PayloadBody, Peeked,
-    ResultClaim,
+    RequestStatus, ResultClaim,
 };
 use crate::store::staging::PayloadSink;
 use crate::store::test_support::{envelope, new_request};
@@ -38,6 +38,7 @@ macro_rules! conformance_tests {
             release_restores_the_original_position,
             retry_waits_until_due,
             cancel_marks_only_the_live_generation,
+            request_status_follows_the_generation,
             cancel_after_deadline_is_a_noop,
             backlog_counts_deadline_buckets,
             pop_is_fifo,
@@ -330,7 +331,7 @@ pub async fn finish_writes_result_and_clears_request_state(store: Store) {
         )
         .await
         .unwrap();
-    assert_eq!(applied.results_written, 1);
+    assert_eq!(applied.result_routes.len(), 1);
     let body = store
         .pop_result("results".into(), NOW_MS)
         .await
@@ -453,7 +454,7 @@ pub async fn replayed_finish_keeps_its_result_blob(store: Store) {
         .apply_outcomes(vec![finish.clone()].into(), NOW_MS)
         .await
         .unwrap();
-    assert_eq!(first.results_written, 1);
+    assert_eq!(first.result_routes.len(), 1);
     let replay = store
         .apply_outcomes(vec![finish].into(), NOW_MS)
         .await
@@ -534,6 +535,64 @@ pub async fn retry_waits_until_due(store: Store) {
         .unwrap()
         .remove(0);
     assert_eq!(head.envelope.unwrap().routing.retry_count, 1);
+}
+
+pub async fn request_status_follows_the_generation(store: Store) {
+    store
+        .submit(vec![new_request("a", "q", 100)])
+        .await
+        .unwrap();
+    let token = new_request("a", "q", 100).envelope.routing.request_token;
+    let status = |token: &str| store.request_status("a".into(), Some(token.into()));
+    assert_eq!(status(&token).await.unwrap(), RequestStatus::Queued);
+    assert_eq!(status("other").await.unwrap(), RequestStatus::Done);
+    assert_eq!(
+        store.request_status("a".into(), None).await.unwrap(),
+        RequestStatus::Queued
+    );
+    assert_eq!(
+        store.request_status("b".into(), None).await.unwrap(),
+        RequestStatus::Done
+    );
+
+    let (head, claim) = claim_head(&store, "q").await;
+    assert_eq!(status(&token).await.unwrap(), RequestStatus::InProgress);
+    assert_eq!(
+        store.request_status("a".into(), None).await.unwrap(),
+        RequestStatus::InProgress
+    );
+    let env = head.envelope.unwrap();
+    store
+        .apply_outcomes(
+            vec![Outcome::Retry {
+                claim,
+                envelope: env.clone(),
+                due_ms: NOW_MS,
+            }]
+            .into(),
+            NOW_MS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(status(&token).await.unwrap(), RequestStatus::Queued);
+
+    store.promote_due_retries(NOW_MS, 10).await.unwrap();
+    let (head, claim) = claim_head(&store, "q").await;
+    assert_eq!(status(&token).await.unwrap(), RequestStatus::InProgress);
+    let env = head.envelope.unwrap();
+    store
+        .apply_outcomes(
+            vec![Outcome::Finish {
+                claim,
+                result: ResultMessage::http(&env, 200, b"ok"),
+                envelope: env,
+            }]
+            .into(),
+            NOW_MS,
+        )
+        .await
+        .unwrap();
+    assert_eq!(status(&token).await.unwrap(), RequestStatus::Done);
 }
 
 pub async fn cancel_marks_only_the_live_generation(store: Store) {

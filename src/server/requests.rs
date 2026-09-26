@@ -1,20 +1,22 @@
 use std::collections::BTreeMap;
 
 use axum::Json;
-use axum::extract::{FromRequest, Multipart, Request, State};
+use axum::extract::{FromRequest, Multipart, Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use serde::{Deserialize, Serialize};
 
 use crate::api::payload::JSON_CONTENT_TYPE;
-use crate::api::request::{InternalRequest, SubmitRequest};
-use crate::api::routing::InternalRouting;
+use crate::api::request::{InternalRequest, ResultDelivery, SubmitRequest};
+use crate::api::routing::{
+    InternalRouting, RESERVED_ROUTE_PREFIX, is_request_route, request_route,
+};
 use crate::clock::now_millis;
 use crate::dispatch::queues::labels_of;
 use crate::server::AppState;
 use crate::server::error::ApiError;
 use crate::store::blob::BlobStore;
 use crate::store::blob::key::BlobKey;
-use crate::store::queue::NewRequest;
+use crate::store::queue::{NewRequest, RequestStatus};
 use crate::store::staging::{PayloadSink, StagedPayload};
 
 /// Largest `request` part of a multipart submission.
@@ -26,6 +28,9 @@ const DEFAULT_PAYLOAD_CONTENT_TYPE: &str = "application/octet-stream";
 pub struct Submitted {
     pub id: String,
     pub request_token: String,
+    /// The route to claim the result from, for a result delivered by request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_route: Option<String>,
 }
 
 fn new_token() -> String {
@@ -116,18 +121,36 @@ async fn envelope(
             sub.request_queue_name
         )));
     };
-    let result_queue_name = if sub.result_queue_name.is_empty() {
-        state.default_result_queue.clone()
-    } else {
-        sub.result_queue_name.clone()
-    };
-    Ok(InternalRequest {
-        routing: InternalRouting {
-            request_token: token.to_owned(),
-            request_queue_name: queue,
-            result_queue_name,
-            ..Default::default()
+    if sub.result_queue_name.starts_with(RESERVED_ROUTE_PREFIX) {
+        return Err(bad(format!(
+            "result_queue_name must not start with {RESERVED_ROUTE_PREFIX:?}"
+        )));
+    }
+    let mut routing = InternalRouting {
+        request_token: token.to_owned(),
+        request_queue_name: queue.clone(),
+        result_queue_name: if sub.result_queue_name.is_empty() {
+            state.default_result_queue.clone()
+        } else {
+            sub.result_queue_name.clone()
         },
+        ..Default::default()
+    };
+    if sub.result_delivery == ResultDelivery::Request {
+        let queue_ttl = queues
+            .iter()
+            .find(|q| q.queue_name == queue)
+            .map_or(0, |q| q.result_ttl_seconds);
+        routing.result_queue_name = request_route(&sub.id);
+        routing.result_ttl_seconds = if queue_ttl > 0 {
+            queue_ttl
+        } else {
+            state.request_result_ttl.as_secs().max(1)
+        };
+        routing.result_routing_resolved = true;
+    }
+    Ok(InternalRequest {
+        routing,
         request: sub.message(),
         payload: StagedPayload::Inline(Vec::new()).info(JSON_CONTENT_TYPE),
         progress: None,
@@ -207,10 +230,21 @@ async fn from_multipart(
 }
 
 fn submitted(r: &NewRequest) -> Submitted {
+    let route = &r.envelope.routing.result_queue_name;
     Submitted {
         id: r.envelope.request.id.clone(),
         request_token: r.envelope.routing.request_token.clone(),
+        result_route: is_request_route(route).then(|| route.clone()),
     }
+}
+
+/// Submits one JSON request.
+pub async fn submit_json(state: &AppState, sub: SubmitRequest) -> Result<Submitted, ApiError> {
+    let mut staged = StagedBlobs::new(state);
+    let new = from_json(state, sub, &mut staged).await?;
+    let response = submitted(&new);
+    commit(state, vec![new], staged).await?;
+    Ok(response)
 }
 
 /// Commits submissions in a task of its own: a client that disconnects now
@@ -292,6 +326,33 @@ pub async fn cancel(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let marked = state.store.cancel(body.ids, now_millis()).await?;
     Ok(Json(serde_json::json!({ "cancelled": marked })))
+}
+
+#[derive(Deserialize)]
+pub struct TokenQuery {
+    #[serde(default)]
+    request_token: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct Status {
+    id: String,
+    status: RequestStatus,
+}
+
+/// Where request `id` stands: its submission `request_token`, or without one
+/// its live submission. Once it is done, its result waits on its result
+/// route.
+pub async fn status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<TokenQuery>,
+) -> Result<Json<Status>, ApiError> {
+    let status = state
+        .store
+        .request_status(id.clone(), q.request_token)
+        .await?;
+    Ok(Json(Status { id, status }))
 }
 
 #[derive(Serialize)]

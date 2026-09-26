@@ -6,20 +6,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
-
 use crate::store::Store;
 use crate::store::blob::BlobStore;
 use crate::store::blob::object::ObjectBlobs;
 use crate::store::blob::postgres::PostgresBlobs;
 use crate::store::postgres::connect::Database;
 use crate::store::postgres::{PgStore, PostgresOptions};
+use crate::store::signal::ResultSignal;
 
 pub struct Fixture {
     pub store: Store,
     pub pg: Arc<PgStore>,
     pub db: Database,
-    pub results: Arc<Notify>,
+    pub results: Arc<ResultSignal>,
     _blob_dir: Option<tempfile::TempDir>,
 }
 
@@ -61,7 +60,7 @@ pub async fn replica(
     lease_ttl: Duration,
 ) -> Fixture {
     let db = Database::connect(url, 8, None).await.unwrap();
-    let results = Arc::new(Notify::new());
+    let results = Arc::new(ResultSignal::default());
     let pg = Arc::new(
         PgStore::open(
             db.clone(),

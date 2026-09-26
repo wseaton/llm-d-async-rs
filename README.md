@@ -132,6 +132,8 @@ were written. Set a lifecycle rule to abort incomplete multipart uploads.
 | `--max-payload-bytes` | 1 GiB | largest request body |
 | `--max-json-body-bytes` | 64 MiB | largest JSON submission (buffered in memory) |
 | `--result-blob-retention` | 24h | how long a result body stays readable after a destructive pop |
+| `--request-result-ttl` | 1h | how long a result [delivered by request](#results-by-request) stays when its queue sets no `result_ttl_seconds` |
+| `--facade-timeout` | 10m | deadline of an [OpenAI-compatible](#openai-compatible-routes) request without `x-llm-d-async-timeout` |
 | `--tls-ca-cert`, `--tls-cert`, `--tls-key`, `--tls-insecure-skip-verify` | | gateway TLS (native TLS) |
 | `-v` | 2 | 2 info, 3–4 debug, 5+ trace; `RUST_LOG` overrides |
 
@@ -152,14 +154,15 @@ Durations use Go syntax (`90s`, `1h30m`, `250ms`), so existing values carry over
       "result_queue_name": "", "result_ttl_seconds": 0,
       "labels": {"tier": "batch"},
       "gate_type": "quota", "gate_params": {"mode": "concurrency", "limit": 8},
-      "resumable": false, "tool_call_parser": null, "render_url": null
+      "resumable": false, "render_url": null
     }
   ]
 }
 ```
 
 Unknown fields are rejected. Redis-only fields (`url`, `retry_queue_name`,
-`claim_*`, `enable_tracing`) must be removed. Each poll, a queue dispatches at
+`claim_*`, `enable_tracing`) must be removed. Result routes starting with `@`
+are the processor's own and cannot be configured. Each poll, a queue dispatches at
 most `batch_size × budget` requests, earliest deadline first.
 
 Pools (`pools.json`) and merge policies (`merge.json`) keep the Go format:
@@ -176,6 +179,8 @@ submitted, except on [resumable queues](#resumable-queues).
 | `POST /v1/requests` | submit. JSON: `{"id","deadline","payload",...}` with an inline JSON payload. Multipart: a `request` part (the same JSON without `payload`) and a `payload` part with any bytes and any content type, streamed to disk. Returns `202 {"id","request_token"}` |
 | `POST /v1/requests/batch` | JSON array, all-or-nothing |
 | `POST /v1/requests/cancel` | `{"ids": [...]}`; best effort before dispatch |
+| `GET /v1/requests/{id}?request_token=` | `{"id","status"}`: `queued`, `in_progress` (claimed by a worker) or `done`; without `request_token`, the live submission of `id` |
+| `POST /v1/chat/completions`, `POST /v1/completions` | [OpenAI-compatible routes](#openai-compatible-routes): submit, wait, answer |
 | `GET /v1/queues` | queues with depth |
 | `POST /v1/results/{route}/claims?wait_ms=&lease_ms=` | lease the oldest result: `{"claim_id","owner_token","lease_ms","result"}`, or 204 |
 | `POST /v1/results/{route}/claims/{id}/renew` | `{"owner_token","lease_ms"}`; 409 once ownership is lost |
@@ -194,6 +199,17 @@ submission, leased delivery (`ReceiveResult`/`RenewResult`/`AckResult`), and
 `OpenResultBody` for results stored by reference. Its tests run the real
 binary on both stores.
 
+### Results by request
+
+A submission with `"result_delivery": "request"` gets a result route of its
+own, `@request-<id>`, named in the reply as `result_route`. Its consumer claims,
+renews and acknowledges it with the result endpoints above (URL-encode the
+route), so a result is delivered at least once to whoever asked for it, and
+the queue's `result_queue_name` does not apply. Such requests need IDs no other
+submission uses. The result expires after the queue's `result_ttl_seconds`, or
+`--request-result-ttl` when the queue sets none. Result writes wake only the
+long polls on their route, across replicas on Postgres.
+
 Results use the Go `ResultMessage` wire format. Response bodies are inline
 in `payload`, as in Go, unless they are binary: a 2xx response with a binary
 media type (`audio/*`, `image/*`, `video/*`, `font/*`, `model/*`,
@@ -208,45 +224,80 @@ repo; its rule (anything not JSON goes to a blob) does not.
 ## Resumable queues
 
 A queue with `"resumable": true` sends eligible `/v1/completions` and
-`/v1/chat/completions` requests to vLLM streamed, with
-`stream_options.include_usage` and `return_token_ids` set, and rebuilds the
-response vLLM returns to the non-streamed request from the stream. The result
-is the same JSON the caller would have got, with the token IDs the processor
-asked for removed. An error event fails the request with the status and body
-the non-streamed request would have failed with; a stream that ends before
-`[DONE]` is retried.
+`/v1/chat/completions` requests through vLLM's token layer. `render_url` names
+a vLLM serving the queue's model with `--enable-scale-out`:
 
-Only an inline JSON payload is eligible, and only when a continuation of its
-generation would answer the same request. These are sent as submitted: a
-`stream: true` request, `n` or `best_of` above 1, beam search, `seed`,
+```text
+ caller's request ──► render_url /v1/…/render ──► prompt token IDs + sampling params
+                      igw_base_url /inference/v1/generate (streamed) ──► output token IDs
+                      render_url /v1/…/derender ──► the caller's response
+```
+
+The result is the response the non-streamed request would have got, with the
+same content, reasoning, tool calls (vLLM's own parser runs in derender),
+finish reason and usage. `usage.prompt_tokens_details` carries the cached
+tokens the generate stream reports (vLLM with `--enable-prompt-tokens-details`),
+capped at the caller's prompt after a resume. Derender does not report
+`stop_reason`, `system_fingerprint`, `usage.completion_tokens_details` or
+per-request `metrics`; those are null. IDs keep vLLM 0.30's form.
+
+An interrupted generation (a stream cut before `[DONE]`, an `abort` finish, a
+drain) keeps its output: the retry re-renders the request, checks the prompt is
+unchanged, and generates from the prompt plus the saved tokens with
+`max_tokens` and `min_tokens` reduced. When the saved output used the whole
+budget, the request finishes with `length` without generating. A generation
+that finished but failed to derender keeps its tokens, and the retry only
+derenders. Progress travels with the request, so a draining replica saves it
+and another continues, and a shed continuation is sent again. The generate
+request carries token IDs, so the gateway's prefix scorers see the same prompt
+on every attempt.
+
+Only an inline JSON payload is eligible, and only when derender reproduces its
+response and a continuation samples the same way. These are sent as submitted:
+a `stream: true` request, `n` or `best_of` above 1, beam search, `seed`,
 structured output (`response_format` other than text, `structured_outputs`),
 `tool_choice` of `required` or a named function, non-zero presence or
 frequency penalty, `logprobs` or `prompt_logprobs`, `echo`,
-`kv_transfer_params`, a completions `prompt` that is not one text or one list
-of token IDs, and chat requests with `include_reasoning: false` or
-`return_prompt_text: true`.
+`kv_transfer_params`, stop strings, `stop_token_ids`, `truncate_prompt_tokens`,
+a completions `prompt` that is not one text or one list of token IDs, and chat
+requests with `return_prompt_text: true`.
 
-vLLM parses tool calls differently in a stream than in a whole response, per
-tool parser, so a chat request that offers `tools` is only streamed when the
-queue names the server's parser in `tool_call_parser`. Supported: `glm45`,
-`glm47`.
+`tests/fixtures/vllm` holds responses recorded from Python vLLM 0.30, streamed
+and not, with the render, generate stream and derender of each; the unit tests
+check that the token layer reproduces every recorded response and resumes from
+every cut. `tests/e2e/resumable.rs` runs the binary against a real vLLM (see
+[Development](#development)).
 
-An interrupted completion continues from the tokens it already produced: the
-retry sends the original prompt's token IDs plus the saved ones, with
-`max_tokens` and `min_tokens` reduced, and the result reads as one
-generation. Progress travels with the request, so a draining replica saves it
-and another continues. An interrupted chat request continues the same way
-when the queue sets `render_url` to a vLLM serving its model with
-`--enable-scale-out`: the processor renders the request there, continues on
-the gateway's `/inference/v1/generate`, and has vLLM derender the whole
-output into the message. The resumed response's
-`usage.completion_tokens_details` is null, since derender does not report
-reasoning tokens. Requests with stop strings or prompt truncation, chat
-requests with `stop_token_ids`, and chat on a queue without `render_url`
-restart instead.
+## OpenAI-compatible routes
 
-The response types follow Python vLLM 0.30. `tests/fixtures/vllm` holds
-responses recorded from it, streamed and not, and the tests rebuild each one.
+`POST /v1/chat/completions` and `POST /v1/completions` on the API port take an
+unmodified OpenAI request, submit it to a queue with its result
+[delivered by request](#results-by-request), hold the connection until the
+result arrives, and answer with it: the response's status and body, or an
+OpenAI-shaped error (`DEADLINE_EXCEEDED` 504, `GATE_DROPPED` 429, `CANCELLED`
+409, `GATE_ERROR` 503, `INFERENCE_ERROR` 502). A `stream: true` request is
+queued unstreamed, so it can resume; the caller gets `: keepalive` comments
+every 10 s while it waits and then the whole response as chat or completion
+chunks (with a usage chunk when `stream_options.include_usage` is set), and an
+error as an error event. A caller that disconnects cancels its request, which
+only works before dispatch.
+
+| request header | |
+|---|---|
+| `x-llm-d-async-queue` | queue name (default: the first queue) |
+| `x-llm-d-async-timeout` | deadline as a duration from now, Go syntax (default `--facade-timeout`) |
+| `x-llm-d-inference-objective` | InferenceObjective for llm-d-router; replaces the queue's `inference_objective` |
+| `x-llm-d-inference-fairness-id` | flow-control fairness identity |
+
+The queue's `inference_objective` is sent as `x-llm-d-inference-objective`.
+
+## Praxis AI
+
+[`bench/praxis-agents`](bench/praxis-agents/README.md) runs agents through
+[Praxis AI](https://github.com/praxis-proxy/ai) in front of the processor:
+Responses API calls through the OpenAI-compatible routes, background responses
+through results by request, and resumption under eviction, with the Praxis AI
+patches it needs.
 
 ## Gates
 
@@ -294,6 +345,15 @@ cargo clippy --all --benches --tests --examples --all-features
 cargo test                  # unit tests
 cargo test --test e2e       # the binary against a stand-in gateway
 ```
+
+The resumable, OpenAI-compatible and Praxis e2e tests run against a real vLLM
+0.30 frontend over a GPU-free engine that replays scripted outputs
+(`tests/fixtures/vllm/v0.30.0/resume`), with a gateway in between that cuts,
+stalls or sheds generate streams. They are skipped unless `VLLM_BIN` (the vLLM
+0.30.0 CLI) and `VCR_BIN` (`vllm-vcr` built for the 0.30 protocol, see
+`tests/fixtures/vllm/README.md`) are set, and the Praxis test also needs
+`PRAXIS_AI_BIN`. `REQUIRE_VLLM=1` and `REQUIRE_PRAXIS=1` make skipping a
+failure. The OpenAI SDK clients run through `uv`.
 
 Postgres tests need `TEST_DATABASE_URL`, a database where they may create
 schemas (each test gets its own). Without it they are skipped; CI sets

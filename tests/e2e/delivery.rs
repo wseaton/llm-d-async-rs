@@ -67,7 +67,7 @@ async fn json_request_round_trip() {
     assert_eq!(seen.path, "/v1/chat/completions");
     assert_eq!(&seen.body[..], br#"{"model":"m",  "prompt": "hi"}"#);
     assert_eq!(seen.header("content-type"), Some("application/json"));
-    assert_eq!(seen.header("x-gateway-inference-objective"), Some("obj"));
+    assert_eq!(seen.header("x-llm-d-inference-objective"), Some("obj"));
     assert_eq!(
         seen.header("x-llm-d-inference-fairness-id"),
         Some("tenant-a")
@@ -753,4 +753,69 @@ async fn abandoned_upload_leaves_no_files() {
     assert_eq!(p.queue_depth("q").await, 0);
     p.submit(request("after", 60)).await;
     assert_eq!(p.next_result(RESULTS).await["id"], "after");
+}
+
+async fn status(p: &Processor, id: &str, token: &str) -> String {
+    let r = p
+        .get(&format!("/v1/requests/{id}?request_token={token}"))
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&r.bytes().await.unwrap()).unwrap();
+    assert_eq!(body["id"], id);
+    body["status"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_result_delivered_by_request_waits_on_its_own_route() {
+    let upstream = Upstream::start().await;
+    upstream.reply_with(|r, _| {
+        Reply::json(200, json!({"echo": r.json()["prompt"]})).delayed(Duration::from_millis(800))
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut q = queue("q", &upstream);
+    q["gate_type"] = json!("local-max-concurrency");
+    q["gate_params"] = json!({"limit": 1});
+    let p = Processor::start(dir.path(), Spec::new(transport(json!([q])))).await;
+
+    let mut first = request("first", 60);
+    first["result_delivery"] = json!("request");
+    let (code, submitted) = p.submit_status(first).await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    let token = submitted["request_token"].as_str().unwrap().to_owned();
+    let route = submitted["result_route"].as_str().unwrap().to_owned();
+    assert_eq!(route, "@request-first");
+    let mut second = request("second", 60);
+    second["result_delivery"] = json!("request");
+    let (_, second) = p.submit_status(second).await;
+    let second_token = second["request_token"].as_str().unwrap().to_owned();
+
+    crate::harness::eventually("the first request in flight", || async {
+        (status(&p, "first", &token).await == "in_progress").then_some(())
+    })
+    .await;
+    assert_eq!(status(&p, "second", &second_token).await, "queued");
+    let r = p.get("/v1/requests/second").await;
+    let body: serde_json::Value = serde_json::from_slice(&r.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        body["status"], "queued",
+        "the live submission without a token"
+    );
+    assert_eq!(status(&p, "first", "not-its-token").await, "done");
+
+    let result = p.next_result(&route).await;
+    assert_eq!(result["id"], "first");
+    assert_eq!(result["status_code"], 200);
+    assert_eq!(status(&p, "first", &token).await, "done");
+    p.no_result_within(RESULTS, Duration::from_millis(200))
+        .await;
+    let second_route = second["result_route"].as_str().unwrap();
+    assert_eq!(p.next_result(second_route).await["id"], "second");
+
+    let mut reserved = request("reserved", 60);
+    reserved["result_queue_name"] = json!("@mine");
+    let (code, body) = p.submit_status(reserved).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    let (code, body) = p.submit_status(request("routed", 60)).await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    assert!(body.get("result_route").is_none(), "{body}");
 }

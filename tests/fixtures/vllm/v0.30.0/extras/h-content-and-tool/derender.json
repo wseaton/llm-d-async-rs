@@ -1,0 +1,81 @@
+{
+  "generate_response": {
+    "request_id": "gen-h-content-and-tool",
+    "choices": [
+      {
+        "index": 0,
+        "token_ids": [
+          27004,
+          9730,
+          279,
+          1917,
+          1156,
+          11,
+          1221,
+          1618,
+          279,
+          5392,
+          13,
+          151351,
+          10056,
+          752,
+          1401,
+          429,
+          705,
+          369,
+          498,
+          624,
+          151352,
+          455,
+          68852,
+          151356,
+          8923,
+          151357,
+          151358,
+          59190,
+          151359,
+          151353,
+          151329
+        ],
+        "finish_reason": "stop"
+      }
+    ]
+  },
+  "prompt_tokens": 206,
+  "chat_request": {
+    "model": "zai-org/GLM-4.7",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Case h-content-and-tool. You are a careful assistant that answers in one short sentence and never adds extra commentary beyond what was asked of you."
+      },
+      {
+        "role": "user",
+        "content": "Tell me what you are about to do, then check the weather in Paris."
+      }
+    ],
+    "max_tokens": 96,
+    "temperature": 0,
+    "n": 1,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Look up the current weather for a city.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

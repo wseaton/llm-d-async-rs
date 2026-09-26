@@ -47,8 +47,9 @@ use crate::store::postgres::counters::PgCounters;
 use crate::store::postgres::partitions::State;
 use crate::store::queue::{
     AckOutcome, Admission, Admitted, Applied, Backlog, NewRequest, Outcome, PayloadBody, Peeked,
-    ResultClaim,
+    RequestStatus, ResultClaim,
 };
+use crate::store::signal::ResultSignal;
 use crate::store::{QueueStore, Stamped};
 
 /// The database clock, which every replica times leases by.
@@ -79,7 +80,7 @@ pub(crate) struct Inner {
     state: Mutex<State>,
     /// Wakes the balancer when a queue is joined or left.
     wake: Notify,
-    results: Arc<Notify>,
+    results: Arc<ResultSignal>,
     cancel_checks: CancelChecks,
 }
 
@@ -98,7 +99,7 @@ impl PgStore {
         db: Database,
         blobs: BlobStore,
         options: &PostgresOptions,
-        results: Arc<Notify>,
+        results: Arc<ResultSignal>,
     ) -> Result<Self, StoreError> {
         schema::migrate(&db.pool).await?;
         let stop = CancellationToken::new();
@@ -253,6 +254,14 @@ impl QueueStore for PgStore {
         _now_ms: i64,
     ) -> BoxFuture<'_, Result<bool, StoreError>> {
         Box::pin(self.inner.cancel_checks.is_cancelled(id, token))
+    }
+
+    fn request_status(
+        &self,
+        id: String,
+        token: Option<String>,
+    ) -> BoxFuture<'_, Result<RequestStatus, StoreError>> {
+        Box::pin(self.inner.status(id, token))
     }
 
     fn cancel(&self, ids: Vec<String>, now_ms: i64) -> BoxFuture<'_, Result<usize, StoreError>> {
@@ -523,7 +532,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied.fenced, 1);
-        assert_eq!(applied.results_written, 0);
+        assert_eq!(applied.result_routes.len(), 0);
 
         let (peeked, claim) = recovered
             .iter()
@@ -544,7 +553,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(applied.results_written, 1);
+        assert_eq!(applied.result_routes.len(), 1);
     }
 
     #[tokio::test]
@@ -630,7 +639,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(applied.results_written, 1, "the leaver finishes its claim");
+        assert_eq!(
+            applied.result_routes.len(),
+            1,
+            "the leaver finishes its claim"
+        );
         a.pg.inner.rebalance(QUEUE).await.unwrap();
         assert!(a.pg.inner.queue_names().is_empty());
         assert!(claim_all(&b.store, 10).await.is_empty());
@@ -834,8 +847,12 @@ mod tests {
                 .unwrap()
         );
 
-        let woken = b.results.notified();
-        tokio::pin!(woken);
+        let watch = b.results.watch("results");
+        let other = b.results.watch("elsewhere");
+        let woken = watch.notify().notified();
+        let not_woken = other.notify().notified();
+        tokio::pin!(woken, not_woken);
+        not_woken.as_mut().enable();
         woken.as_mut().enable();
         a.store
             .apply_outcomes(
@@ -852,6 +869,12 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), woken)
             .await
             .expect("the other replica hears about the result");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), not_woken)
+                .await
+                .is_err(),
+            "a write to one route wakes no other"
+        );
         let claimed = b
             .store
             .claim_result("results".into(), "c".into(), 1_000, NOW_MS)
@@ -902,7 +925,7 @@ mod tests {
     async fn super_open(
         db: crate::store::postgres::connect::Database,
         blobs: crate::store::blob::BlobStore,
-        results: Arc<tokio::sync::Notify>,
+        results: Arc<crate::store::signal::ResultSignal>,
     ) -> crate::store::postgres::PgStore {
         crate::store::postgres::PgStore::open(
             db,
@@ -946,7 +969,7 @@ mod tests {
         .await
         .expect("a finish waited on its own connection")
         .unwrap();
-        assert_eq!(applied.results_written, 1);
+        assert_eq!(applied.result_routes.len(), 1);
         let key = crate::store::blob::key::BlobKey::request("0a").unwrap();
         assert!(f.store.blobs().open(&key).await.unwrap().is_none());
     }
@@ -981,7 +1004,7 @@ mod tests {
             .apply_outcomes(vec![finish(stale), finish(current)].into(), NOW_MS)
             .await
             .unwrap();
-        assert_eq!((applied.results_written, applied.fenced), (1, 1));
+        assert_eq!((applied.result_routes.len(), applied.fenced), (1, 1));
         assert_eq!(
             f.store
                 .result_depth("results".into(), NOW_MS)
@@ -1222,7 +1245,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(applied.results_written, 1);
+        assert_eq!(applied.result_routes.len(), 1);
         assert_eq!(body_rows(&f).await, ["r001"], "a retry keeps its body");
         match f.store.open_payload(&retried).await.unwrap() {
             Some(crate::store::queue::PayloadBody::Inline(b)) => {

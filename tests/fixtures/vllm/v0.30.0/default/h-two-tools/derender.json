@@ -1,0 +1,104 @@
+{
+  "generate_response": {
+    "request_id": "gen-h-two-tools",
+    "choices": [
+      {
+        "index": 0,
+        "token_ids": [
+          11608,
+          8650,
+          13057,
+          525,
+          4362,
+          11,
+          773,
+          2176,
+          7375,
+          633,
+          2598,
+          13,
+          151351,
+          198,
+          151352,
+          455,
+          68852,
+          151356,
+          8923,
+          151357,
+          151358,
+          59190,
+          151359,
+          151353,
+          198,
+          151352,
+          455,
+          3009,
+          151356,
+          8923,
+          151357,
+          151358,
+          59190,
+          151359,
+          151353,
+          151329
+        ],
+        "finish_reason": "stop"
+      }
+    ]
+  },
+  "prompt_tokens": 262,
+  "chat_request": {
+    "model": "zai-org/GLM-4.7",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Case h-two-tools. You are a careful assistant that answers in one short sentence and never adds extra commentary beyond what was asked of you."
+      },
+      {
+        "role": "user",
+        "content": "What is the weather and the local time in Paris right now?"
+      }
+    ],
+    "max_tokens": 96,
+    "temperature": 0,
+    "n": 1,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Look up the current weather for a city.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_time",
+          "description": "Look up the current local time for a city.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

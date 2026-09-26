@@ -14,7 +14,7 @@ use crate::store::postgres::partitions::{Tracked, partition_of};
 use crate::store::postgres::{Inner, RESULTS_CHANNEL};
 use crate::store::queue::{
     Admission, Admitted, Applied, Backlog, ClaimRef, NewRequest, Outcome, PayloadBody, Peeked,
-    PendingKey,
+    PendingKey, RequestStatus,
 };
 use crate::store::staging::StagedPayload;
 
@@ -150,6 +150,24 @@ impl NewResult {
     }
 }
 
+/// Postgres caps a notification payload below 8000 bytes.
+const MAX_NOTIFICATION: usize = 7900;
+
+/// The routes written, one per line, or empty (any route) when they do not
+/// fit a notification or one could be mistaken for two.
+fn notification<'a>(routes: impl Iterator<Item = &'a str>) -> String {
+    let routes: std::collections::BTreeSet<&str> = routes.collect();
+    let payload = routes.iter().copied().collect::<Vec<_>>().join("\n");
+    let ambiguous = routes
+        .iter()
+        .any(|r| r.is_empty() || r.contains(['\n', '\r']));
+    if ambiguous || payload.len() > MAX_NOTIFICATION {
+        String::new()
+    } else {
+        payload
+    }
+}
+
 /// Writes results and registers the blobs they reference, which live as
 /// long as their result.
 async fn insert_results(txn: &Transaction<'_>, results: &[NewResult]) -> Result<(), StoreError> {
@@ -193,7 +211,8 @@ async fn insert_results(txn: &Transaction<'_>, results: &[NewResult]) -> Result<
         )
         .await?;
     }
-    txn.execute_cached("SELECT pg_notify($1, '')", &[&RESULTS_CHANNEL])
+    let payload = notification(results.iter().map(|r| r.route.as_str()));
+    txn.execute_cached("SELECT pg_notify($1, $2)", &[&RESULTS_CHANNEL, &payload])
         .await?;
     Ok(())
 }
@@ -353,7 +372,7 @@ impl Inner {
         drop(_cycle);
         self.blobs.remove_dropped(&dropped).await;
         if out.contains(&Admitted::Finished) {
-            self.results.notify_waiters();
+            self.results.all();
         }
         Ok(out)
     }
@@ -532,7 +551,7 @@ impl Inner {
                     }
                 }
             }
-            applied.results_written = results.len();
+            applied.result_routes = results.iter().map(|r| r.route.clone()).collect();
             dropped = drop_request_blobs(&txn, &blob_tokens).await?;
             insert_results(&txn, &results).await?;
         }
@@ -594,9 +613,8 @@ impl Inner {
             }
         }
         self.blobs.remove_dropped(&dropped).await;
-        if applied.results_written > 0 {
-            self.results.notify_waiters();
-        }
+        self.results
+            .written(applied.result_routes.iter().map(String::as_str));
         Ok(applied)
     }
 
@@ -624,6 +642,27 @@ impl Inner {
                 Ok(self.blobs.open(&key).await?.map(PayloadBody::Blob))
             }
         }
+    }
+
+    pub(crate) async fn status(
+        &self,
+        id: String,
+        token: Option<String>,
+    ) -> Result<RequestStatus, StoreError> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT claimed_by FROM lda_requests
+                 WHERE id = $1 AND ($2::text IS NULL OR request_token = $2)
+                 ORDER BY claimed_by DESC LIMIT 1",
+                &[&id, &token],
+            )
+            .await?;
+        Ok(match row.map(|r| r.get::<_, i64>(0)) {
+            None => RequestStatus::Done,
+            Some(0) => RequestStatus::Queued,
+            Some(_) => RequestStatus::InProgress,
+        })
     }
 
     pub(crate) async fn cancel(&self, ids: Vec<String>, now_ms: i64) -> Result<usize, StoreError> {

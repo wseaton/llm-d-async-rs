@@ -1,10 +1,10 @@
-data: {"id":"cmpl-ac92a81b95fafb00","object":"text_completion","created":1790361587,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" understood","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,34668,2268,14739,13,576,19827,5823,419,9929,438,264,1140,315,3950,14142,4751,1091,438,1467,11,773,279,45375,1969,10701,3950,2022,1588,25],"token_ids":[15972]}]}
+data: {"id":"cmpl-90cc41bb8cf4e52a","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":" understood","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":[4207,272,34668,2268,14739,13,576,19827,5823,419,9929,438,264,1140,315,3950,14142,4751,1091,438,1467,11,773,279,45375,1969,10701,3950,2022,1588,25],"token_ids":[15972]}]}
 
-data: {"id":"cmpl-ac92a81b95fafb00","object":"text_completion","created":1790361587,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":".","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[13]}]}
+data: {"id":"cmpl-90cc41bb8cf4e52a","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":".","logprobs":null,"finish_reason":null,"stop_reason":null,"prompt_token_ids":null,"token_ids":[13]}]}
 
-data: {"id":"cmpl-ac92a81b95fafb00","object":"text_completion","created":1790361587,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"","logprobs":null,"finish_reason":"stop","stop_reason":null,"prompt_token_ids":null,"token_ids":[151329]}]}
+data: {"id":"cmpl-90cc41bb8cf4e52a","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[{"index":0,"text":"","logprobs":null,"finish_reason":"stop","stop_reason":null,"prompt_token_ids":null,"token_ids":[151329]}]}
 
-data: {"id":"cmpl-ac92a81b95fafb00","object":"text_completion","created":1790361587,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":31,"total_tokens":34,"completion_tokens":3},"system_fingerprint":"vllm-0.30.0-8259f3cd"}
+data: {"id":"cmpl-90cc41bb8cf4e52a","object":"text_completion","created":1790428492,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":31,"total_tokens":34,"completion_tokens":3},"system_fingerprint":"vllm-0.30.0-8259f3cd"}
 
 data: [DONE]
 

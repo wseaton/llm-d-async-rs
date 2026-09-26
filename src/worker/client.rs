@@ -9,7 +9,7 @@ use crate::api::result::StoredBody;
 use crate::store::blob::key::BlobKey;
 use crate::store::blob::{BlobError, BlobStore, BlobWriter};
 use crate::store::queue::PayloadBody;
-use crate::worker::vllm::{Finished, Reassembly, StreamError};
+use crate::worker::vllm::{Reassembly, StreamError};
 
 const EVENT_STREAM: &str = "text/event-stream";
 
@@ -351,14 +351,14 @@ impl InferenceClient {
 
     /// POSTs `body`, which asks for an event stream, and feeds the stream to
     /// `reassembly`, which keeps the output so far when this fails or is
-    /// cancelled. Returns the response status and what the stream yielded.
+    /// cancelled. Returns the response status once the stream has ended.
     pub async fn send_streamed(
         &self,
         url: &str,
         mut headers: HeaderMap,
         body: Bytes,
         reassembly: &mut Reassembly,
-    ) -> Result<(u16, Finished), Box<ClientError>> {
+    ) -> Result<u16, Box<ClientError>> {
         headers.remove(CONTENT_LENGTH);
         let mut response = self
             .http
@@ -415,10 +415,7 @@ impl InferenceClient {
                 }
             }
         }
-        let finished = reassembly
-            .finish()
-            .map_err(|e| Box::new(stream_failed(e)))?;
-        Ok((status, finished))
+        Ok(status)
     }
 
     async fn stream_body(

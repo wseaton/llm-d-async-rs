@@ -1,0 +1,10 @@
+data: {"request_id":"generate-tokens-cmpl-859174351158dd6c","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[3040],"routed_experts":null,"sampling_mask":null}],"usage":null}
+
+data: {"request_id":"generate-tokens-cmpl-859174351158dd6c","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[13],"routed_experts":null,"sampling_mask":null}],"usage":null}
+
+data: {"request_id":"generate-tokens-cmpl-859174351158dd6c","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","token_ids":[151329],"routed_experts":null,"sampling_mask":null}],"usage":null}
+
+data: {"request_id":"generate-tokens-cmpl-859174351158dd6c","choices":[],"usage":{"prompt_tokens":25,"total_tokens":28,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":0}}}
+
+data: [DONE]
+

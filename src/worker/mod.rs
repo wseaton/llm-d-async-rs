@@ -177,10 +177,9 @@ impl Worker {
             labels,
             claim_id: guard.claim_id(),
             payload,
-            resuming: source.resumable.then(|| Resuming {
+            resuming: source.render_url.as_deref().map(|render_url| Resuming {
                 igw_base_url: &source.igw_base_url,
-                tool_call_parser: source.tool_call_parser,
-                render_url: source.render_url.as_deref(),
+                render_url,
             }),
         };
         let end = self.decide(&mut envelope, &mut dispatching).await;
@@ -466,9 +465,7 @@ impl Worker {
                     .await?;
                 match (streamed.as_mut(), inline) {
                     (Some(plan), Some(body)) => {
-                        resuming
-                            .send(&self.client, url, header_map, plan, &body)
-                            .await
+                        resuming.send(&self.client, header_map, plan, &body).await
                     }
                     _ => {
                         self.client
@@ -545,7 +542,7 @@ impl Worker {
             envelope.progress = None;
             return None;
         }
-        envelope.progress = streamed?.reassembly.progress(resumes + 1);
+        envelope.progress = Some(streamed?.reassembly.progress(resumes + 1));
         let added = envelope
             .progress
             .as_ref()?
@@ -808,8 +805,6 @@ mod tests {
                     igw_base_url: String::new(),
                     request_path: String::new(),
                     inference_objective: String::new(),
-                    resumable: false,
-                    tool_call_parser: None,
                     render_url: None,
                 }),
                 url: url.into(),

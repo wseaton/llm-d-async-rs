@@ -93,6 +93,19 @@ pub struct SubmitRequest {
     pub request_queue_name: String,
     #[serde(default)]
     pub result_queue_name: String,
+    #[serde(default)]
+    pub result_delivery: ResultDelivery,
+}
+
+/// Where a submission's result goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultDelivery {
+    /// To its result queue, whose consumers claim results oldest first.
+    #[default]
+    Route,
+    /// To a route of its own, named in the reply to the submission.
+    Request,
 }
 
 impl SubmitRequest {

@@ -17,6 +17,7 @@ pub mod embedded;
 pub mod error;
 pub mod postgres;
 pub mod queue;
+pub mod signal;
 pub mod staging;
 
 #[cfg(test)]
@@ -34,7 +35,7 @@ use crate::store::blob::{BlobBody, BlobStore};
 use crate::store::error::StoreError;
 use crate::store::queue::{
     AckOutcome, Admission, Admitted, Applied, Backlog, NewRequest, Outcome, PayloadBody, Peeked,
-    ResultClaim,
+    RequestStatus, ResultClaim,
 };
 
 pub type Store = Arc<dyn QueueStore>;
@@ -108,6 +109,14 @@ pub trait QueueStore: Send + Sync {
         token: String,
         now_ms: i64,
     ) -> BoxFuture<'_, Result<bool, StoreError>>;
+
+    /// Where the generation `token` of request `id` stands, or without a
+    /// token its live generation.
+    fn request_status(
+        &self,
+        id: String,
+        token: Option<String>,
+    ) -> BoxFuture<'_, Result<RequestStatus, StoreError>>;
 
     /// Marks the live generation of each ID cancelled. Unknown, finished and
     /// expired IDs are a no-op. Returns how many IDs were marked.

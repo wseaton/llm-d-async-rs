@@ -2,12 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::clock::now_millis;
 use crate::dispatch::claim::Pending;
 use crate::store::Store;
 use crate::store::queue::Outcome;
+use crate::store::signal::ResultSignal;
 
 const MAX_BATCH: usize = 1024;
 /// Result bytes one batch may carry.
@@ -58,7 +59,11 @@ pub fn weight(outcome: &Outcome) -> usize {
 /// Writes claim outcomes to the store in batches until every sender is gone.
 /// A batch that fails is retried until it is written: dropping it would
 /// strand its claims until the next restart.
-pub async fn run(store: Store, mut outcomes: UnboundedReceiver<Pending>, results: Arc<Notify>) {
+pub async fn run(
+    store: Store,
+    mut outcomes: UnboundedReceiver<Pending>,
+    results: Arc<ResultSignal>,
+) {
     while let Some(first) = outcomes.recv().await {
         let mut bytes = weight(&first.outcome);
         let mut batch = vec![first];
@@ -78,9 +83,7 @@ pub async fn run(store: Store, mut outcomes: UnboundedReceiver<Pending>, results
         loop {
             match store.apply_outcomes(Arc::clone(&batch), now_millis()).await {
                 Ok(applied) => {
-                    if applied.results_written > 0 {
-                        results.notify_waiters();
-                    }
+                    results.written(applied.result_routes.iter().map(String::as_str));
                     if applied.fenced > 0 {
                         tracing::debug!(
                             fenced = applied.fenced,

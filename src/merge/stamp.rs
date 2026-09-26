@@ -20,7 +20,7 @@ pub fn base_headers(
     let mut h = Headers::default();
     h.set("Content-Type", &envelope.payload.content_type);
     if !source.inference_objective.is_empty() {
-        h.set(headers::GATEWAY_OBJECTIVE, &source.inference_objective);
+        h.set(headers::OBJECTIVE, &source.inference_objective);
     }
     for (k, v) in &envelope.request.headers {
         h.set(k, v);
@@ -61,8 +61,6 @@ mod tests {
             igw_base_url: "http://gw".into(),
             request_path: "/v1/completions".into(),
             inference_objective: objective.into(),
-            resumable: false,
-            tool_call_parser: None,
             render_url: None,
         }
     }
@@ -91,10 +89,21 @@ mod tests {
             &fairness(Some("x-llm-d-inference-fairness-id")),
         );
         assert_eq!(h.get("content-type"), Some("audio/wav"));
-        assert_eq!(h.get("x-gateway-inference-objective"), Some("obj"));
+        assert_eq!(h.get("x-llm-d-inference-objective"), Some("obj"));
         assert_eq!(h.get("x-custom"), Some("1"));
         assert_eq!(h.get("x-llm-d-inference-fairness-id"), Some("tenant-a"));
         assert_eq!(h.to_header_map().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_request_objective_replaces_the_queue_objective() {
+        let mut env = envelope("a", "t", "q", 1);
+        env.request
+            .headers
+            .insert("X-LLM-D-Inference-Objective".into(), "urgent".into());
+        let h = base_headers(&source("batch"), &env, &fairness(None));
+        assert_eq!(h.get("x-llm-d-inference-objective"), Some("urgent"));
+        assert_eq!(h.to_header_map().unwrap().len(), 2);
     }
 
     #[test]
@@ -111,7 +120,7 @@ mod tests {
                 &fairness(Some("x-llm-d-inference-fairness-id")),
             );
             assert_eq!(h.get("x-llm-d-inference-fairness-id"), Some("caller"));
-            assert_eq!(h.get("x-gateway-inference-objective"), None);
+            assert_eq!(h.get("x-llm-d-inference-objective"), None);
         }
     }
 

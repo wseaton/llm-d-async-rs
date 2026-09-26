@@ -31,7 +31,7 @@ use crate::store::embedded::tables::{
 use crate::store::error::StoreError;
 use crate::store::queue::{
     AckOutcome, Admission, Admitted, Applied, Backlog, NewRequest, Outcome, PayloadBody, Peeked,
-    ResultClaim,
+    RequestStatus, ResultClaim,
 };
 use crate::store::{QueueStore, Stamped};
 
@@ -246,6 +246,14 @@ impl QueueStore for EmbeddedStore {
         now_ms: i64,
     ) -> BoxFuture<'_, Result<bool, StoreError>> {
         Box::pin(self.cancelled(id, token, now_ms))
+    }
+
+    fn request_status(
+        &self,
+        id: String,
+        token: Option<String>,
+    ) -> BoxFuture<'_, Result<RequestStatus, StoreError>> {
+        Box::pin(self.status(id, token))
     }
 
     fn cancel(&self, ids: Vec<String>, now_ms: i64) -> BoxFuture<'_, Result<usize, StoreError>> {

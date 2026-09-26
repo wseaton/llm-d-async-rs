@@ -262,6 +262,28 @@ CASES: list[dict] = [
         "finish": "stop",
     },
     {
+        "name": "h-default-limit",
+        "endpoint": "/v1/chat/completions",
+        "request": {
+            k: v
+            for k, v in chat("h-default-limit", "What is the capital of Spain?").items()
+            if k != "max_tokens"
+        },
+        "output": "A plain lookup.</think>The capital of Spain is Madrid.",
+        "finish": "stop",
+    },
+    {
+        "name": "h-hidden-reasoning",
+        "endpoint": "/v1/chat/completions",
+        "request": chat(
+            "h-hidden-reasoning",
+            "What is the capital of Portugal?",
+            include_reasoning=False,
+        ),
+        "output": "Another lookup.</think>The capital of Portugal is Lisbon.",
+        "finish": "stop",
+    },
+    {
         "name": "h-stop-string",
         "endpoint": "/v1/chat/completions",
         "request": chat(
@@ -570,14 +592,12 @@ def write_case_files(
     for case in CASES:
         name = case["name"]
         body = plans[name]["request"]
-        sent = rewrite_for_stream(body)
         status, ctype, response = plain[name]
         s_status, s_ctype, stream = streamed[name]
 
         case_dir = out_root / config / name
         case_dir.mkdir(parents=True, exist_ok=True)
         (case_dir / "request.json").write_text(json.dumps(body, indent=2, ensure_ascii=False) + "\n")
-        (case_dir / "sent.json").write_text(json.dumps(sent, indent=2, ensure_ascii=False) + "\n")
         (case_dir / "response.json").write_bytes(response)
         (case_dir / "stream.sse").write_bytes(stream)
         (case_dir / "meta.json").write_text(
@@ -599,6 +619,70 @@ def write_case_files(
             + "\n"
         )
         print(f"  {config}/{name}: {status} / {s_status} ({len(stream)} sse bytes)")
+
+
+def token_layer_eligible(case: dict) -> bool:
+    return case["finish"] != "error" and "stop" not in case["request"]
+
+
+def generated_tokens(sse: bytes) -> tuple[list[int], str]:
+    output: list[int] = []
+    finish = ""
+    for line in sse.decode().splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        for choice in json.loads(line[6:]).get("choices", []):
+            output += choice.get("token_ids") or []
+            finish = choice.get("finish_reason") or finish
+    return output, finish
+
+
+def record_token_layer(server: Server, plans: dict[str, dict], out_root: Path, config: str) -> None:
+    """Record what a resumable queue sends through vLLM's token layer: the render of
+    the caller's request, the /inference/v1/generate stream of the rendered prompt,
+    and the derender of its output."""
+    for case in CASES:
+        if not token_layer_eligible(case):
+            continue
+        name = case["name"]
+        request = plans[name]["request"]
+        endpoint = case["endpoint"]
+        rendered = server.json_post(endpoint + "/render", request)
+        prompt = rendered[0] if endpoint == "/v1/completions" else rendered
+        generate = dict(prompt, stream=True, stream_options={"include_usage": True})
+        status, ctype, stream = server.request("POST", "/inference/v1/generate", generate)
+        if status != 200 or not ctype.startswith("text/event-stream"):
+            raise SystemExit(f"{name}: generate returned {status} {ctype}: {stream[:400]!r}")
+        output, finish = generated_tokens(stream)
+        response = {
+            "request_id": f"gen-{name}",
+            "choices": [{"index": 0, "token_ids": output, "finish_reason": finish}],
+        }
+        tokens = len(prompt["token_ids"])
+        if endpoint == "/v1/completions":
+            derender = {
+                "generate_responses": [response],
+                "prompt_tokens": [tokens],
+                "completion_request": request,
+            }
+        else:
+            derender = {
+                "generate_response": response,
+                "prompt_tokens": tokens,
+                "chat_request": request,
+            }
+        derendered = server.json_post(endpoint + "/derender", derender)
+
+        case_dir = out_root / config / name
+        for file, value in [
+            ("rendered.json", rendered),
+            ("generate.json", generate),
+            ("derender.json", derender),
+            ("derendered.json", derendered),
+        ]:
+            (case_dir / file).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+        (case_dir / "generate.sse").write_bytes(stream)
+        print(f"  {config}/{name}: {len(output)} tokens through the token layer")
 
 
 def main() -> None:
@@ -660,6 +744,13 @@ def main() -> None:
             server.stop()
 
         write_case_files(plans, plain, streamed, server_args, out_root, config, args.model)
+
+        print(f"pass 4: recording config {config} through the token layer")
+        server.start(f"{config}-tokens", SERVER_CONFIGS[config] + ["--enable-scale-out"], trace)
+        try:
+            record_token_layer(server, plans, out_root, config)
+        finally:
+            server.stop()
 
 
 if __name__ == "__main__":

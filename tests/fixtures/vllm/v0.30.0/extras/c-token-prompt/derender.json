@@ -1,0 +1,60 @@
+{
+  "generate_responses": [
+    {
+      "request_id": "gen-c-token-prompt",
+      "choices": [
+        {
+          "index": 0,
+          "token_ids": [
+            15972,
+            13,
+            151329
+          ],
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "prompt_tokens": [
+    31
+  ],
+  "completion_request": {
+    "model": "zai-org/GLM-4.7",
+    "prompt": [
+      4207,
+      272,
+      34668,
+      2268,
+      14739,
+      13,
+      576,
+      19827,
+      5823,
+      419,
+      9929,
+      438,
+      264,
+      1140,
+      315,
+      3950,
+      14142,
+      4751,
+      1091,
+      438,
+      1467,
+      11,
+      773,
+      279,
+      45375,
+      1969,
+      10701,
+      3950,
+      2022,
+      1588,
+      25
+    ],
+    "max_tokens": 32,
+    "temperature": 0,
+    "n": 1
+  }
+}

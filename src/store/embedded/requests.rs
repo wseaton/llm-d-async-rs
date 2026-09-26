@@ -5,7 +5,7 @@ use bytes::Bytes;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, Table, WriteTransaction};
 
 use crate::api::payload::PayloadStorage;
-use crate::api::request::InternalRequest;
+use crate::api::request::{InternalRequest, generation_key};
 use crate::api::result::ResultMessage;
 use crate::store::blob::key::BlobKey;
 use crate::store::embedded::EmbeddedStore;
@@ -16,7 +16,7 @@ use crate::store::embedded::tables::{
 use crate::store::error::StoreError;
 use crate::store::queue::{
     Admission, Admitted, Applied, Backlog, CANCEL_MARKER_TTL_MS, ClaimRef, NewRequest, Outcome,
-    PayloadBody, Peeked, PendingKey,
+    PayloadBody, Peeked, PendingKey, RequestStatus,
 };
 use crate::store::staging::StagedPayload;
 
@@ -262,6 +262,34 @@ impl EmbeddedStore {
         .await
     }
 
+    pub(crate) async fn status(
+        &self,
+        id: String,
+        token: Option<String>,
+    ) -> Result<RequestStatus, StoreError> {
+        self.run(move |db| {
+            let txn = db.begin_read()?;
+            let active = txn.open_table(ACTIVE)?;
+            let live = match active.get(id.as_str())? {
+                Some(value) => serde_json::from_str::<TokenRecord>(value.value())?.token,
+                None => return Ok(RequestStatus::Done),
+            };
+            if token.is_some_and(|t| t != live) {
+                return Ok(RequestStatus::Done);
+            }
+            let token = live;
+            let claimed = txn.open_table(CLAIMED)?;
+            Ok(
+                if claimed.get(generation_key(&id, &token).as_str())?.is_some() {
+                    RequestStatus::InProgress
+                } else {
+                    RequestStatus::Queued
+                },
+            )
+        })
+        .await
+    }
+
     pub(crate) async fn cancel_ids(
         &self,
         ids: Vec<String>,
@@ -406,7 +434,7 @@ impl EmbeddedStore {
                             envelope, result, ..
                         } => {
                             t.finish(envelope, result, now_ms)?;
-                            applied.results_written += 1;
+                            applied.result_routes.push(envelope.routing.result_queue_name.clone());
                         }
                         Outcome::Retry {
                             envelope, due_ms, ..

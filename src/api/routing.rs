@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 
 pub const LABEL_CLASSIFICATION: &str = "classification";
 
+/// Result routes starting with this are the processor's own: producers and
+/// queue configs cannot name them.
+pub const RESERVED_ROUTE_PREFIX: char = '@';
+
+const REQUEST_ROUTE_PREFIX: &str = "@request-";
+
+/// The result route of request `id`, delivered by request. Such requests
+/// need IDs no other submission uses, or their results share a route.
+pub fn request_route(id: &str) -> String {
+    format!("{REQUEST_ROUTE_PREFIX}{id}")
+}
+
+pub fn is_request_route(route: &str) -> bool {
+    route.starts_with(REQUEST_ROUTE_PREFIX)
+}
+
 /// Quota classification a gate stamps on a message in classifying mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {

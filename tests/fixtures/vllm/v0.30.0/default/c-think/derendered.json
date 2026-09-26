@@ -1,0 +1,31 @@
+{
+  "id": "gen-c-think",
+  "object": "text_completion",
+  "created": 1790428505,
+  "model": "zai-org/GLM-4.7",
+  "choices": [
+    {
+      "index": 0,
+      "text": "<think>The caller wants a short answer. Keep it to one line.</think>Hi there!",
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null,
+      "prompt_logprobs": null,
+      "prompt_token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 27,
+    "total_tokens": 46,
+    "completion_tokens": 19,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}

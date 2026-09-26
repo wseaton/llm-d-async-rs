@@ -1,1 +1,50 @@
-{"id":"chatcmpl-h-content-and-tool","object":"chat.completion","created":1790366226,"model":"zai-org/GLM-4.7","choices":[{"index":0,"message":{"role":"assistant","content":"Let me look that up for you.","refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[{"id":"bc499d15ddc48a94","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}],"reasoning":"Announce the action first, then call the tool."},"logprobs":null,"finish_reason":"tool_calls","stop_reason":null,"token_ids":null,"routed_experts":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":206,"total_tokens":237,"completion_tokens":31,"prompt_tokens_details":null,"completion_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"prompt_text":null,"kv_transfer_params":null,"ec_transfer_params":null,"metrics":null}
+{
+  "id": "gen-h-content-and-tool",
+  "object": "chat.completion",
+  "created": 1790428506,
+  "model": "zai-org/GLM-4.7",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Let me look that up for you.",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "97ee91bfb0894608",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Paris\"}"
+            }
+          }
+        ],
+        "reasoning": "Announce the action first, then call the tool."
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 206,
+    "total_tokens": 237,
+    "completion_tokens": 31,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "prompt_logprobs": null,
+  "prompt_token_ids": null,
+  "prompt_text": null,
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}

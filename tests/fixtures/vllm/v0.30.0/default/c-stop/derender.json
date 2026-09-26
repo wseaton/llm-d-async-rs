@@ -1,0 +1,28 @@
+{
+  "generate_responses": [
+    {
+      "request_id": "gen-c-stop",
+      "choices": [
+        {
+          "index": 0,
+          "token_ids": [
+            3040,
+            13,
+            151329
+          ],
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "prompt_tokens": [
+    25
+  ],
+  "completion_request": {
+    "model": "zai-org/GLM-4.7",
+    "prompt": "Case c-stop. Finish the following arithmetic sentence with a single short phrase and nothing else. The sum of two and two is",
+    "max_tokens": 32,
+    "temperature": 0,
+    "n": 1
+  }
+}

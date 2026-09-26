@@ -1,0 +1,29 @@
+{
+  "generate_responses": [
+    {
+      "request_id": "gen-c-caller-token-ids",
+      "choices": [
+        {
+          "index": 0,
+          "token_ids": [
+            6303,
+            13,
+            151329
+          ],
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  ],
+  "prompt_tokens": [
+    28
+  ],
+  "completion_request": {
+    "model": "zai-org/GLM-4.7",
+    "prompt": "Case c-caller-token-ids. Answer with one short phrase: on a clear day the colour of the sky above an open field is",
+    "max_tokens": 32,
+    "temperature": 0,
+    "n": 1,
+    "return_token_ids": true
+  }
+}

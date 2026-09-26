@@ -32,9 +32,10 @@ pub struct WaitQuery {
 }
 
 /// Retries `attempt` until it finds something or `wait` elapses, waking on
-/// every result write.
-async fn long_poll<T, F, Fut>(
+/// every result write to `route`.
+pub async fn long_poll<T, F, Fut>(
     state: &AppState,
+    route: &str,
     wait: Duration,
     mut attempt: F,
 ) -> Result<Option<T>, StoreError>
@@ -43,8 +44,9 @@ where
     Fut: Future<Output = Result<Option<T>, StoreError>>,
 {
     let deadline = Instant::now() + wait.min(MAX_WAIT);
+    let watch = state.results.watch(route);
     loop {
-        let written = state.results.notified();
+        let written = watch.notify().notified();
         tokio::pin!(written);
         written.as_mut().enable();
         if let Some(found) = attempt().await? {
@@ -72,7 +74,7 @@ pub async fn pop(
     Path(route): Path<String>,
     Query(q): Query<WaitQuery>,
 ) -> Result<Response, ApiError> {
-    let found = long_poll(&state, Duration::from_millis(q.wait_ms), || {
+    let found = long_poll(&state, &route, Duration::from_millis(q.wait_ms), || {
         state.store.pop_result(route.clone(), now_millis())
     })
     .await?;
@@ -107,7 +109,7 @@ pub async fn claim(
 ) -> Result<Response, ApiError> {
     let lease = lease_ms(q.lease_ms)?;
     let owner = format!("{:032x}", rand::random::<u128>());
-    let found = long_poll(&state, Duration::from_millis(q.wait_ms), || {
+    let found = long_poll(&state, &route, Duration::from_millis(q.wait_ms), || {
         state
             .store
             .claim_result(route.clone(), owner.clone(), lease, now_millis())

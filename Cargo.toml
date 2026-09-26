@@ -23,7 +23,7 @@ rand = "0.9"
 redb = "4.3"
 reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "stream"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1.53", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time", "net"] }

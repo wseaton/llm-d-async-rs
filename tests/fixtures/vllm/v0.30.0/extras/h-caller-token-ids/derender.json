@@ -1,0 +1,45 @@
+{
+  "generate_response": {
+    "request_id": "gen-h-caller-token-ids",
+    "choices": [
+      {
+        "index": 0,
+        "token_ids": [
+          88119,
+          13426,
+          52790,
+          3405,
+          13,
+          151351,
+          785,
+          6722,
+          315,
+          9851,
+          374,
+          19808,
+          13,
+          151329
+        ],
+        "finish_reason": "stop"
+      }
+    ]
+  },
+  "prompt_tokens": 44,
+  "chat_request": {
+    "model": "zai-org/GLM-4.7",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Case h-caller-token-ids. You are a careful assistant that answers in one short sentence and never adds extra commentary beyond what was asked of you."
+      },
+      {
+        "role": "user",
+        "content": "What is the capital of Germany?"
+      }
+    ],
+    "max_tokens": 64,
+    "temperature": 0,
+    "n": 1,
+    "return_token_ids": true
+  }
+}

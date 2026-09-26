@@ -1,0 +1,33 @@
+{
+  "generate_responses": [
+    {
+      "request_id": "gen-c-length",
+      "choices": [
+        {
+          "index": 0,
+          "token_ids": [
+            825,
+            11,
+            1378,
+            11,
+            2326,
+            11,
+            3040,
+            11
+          ],
+          "finish_reason": "length"
+        }
+      ]
+    }
+  ],
+  "prompt_tokens": [
+    26
+  ],
+  "completion_request": {
+    "model": "zai-org/GLM-4.7",
+    "prompt": "Case c-length. Count upward in English words, separated by commas, and keep going for as long as you are allowed to:",
+    "max_tokens": 8,
+    "temperature": 0,
+    "n": 1
+  }
+}

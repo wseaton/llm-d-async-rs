@@ -1,0 +1,52 @@
+{
+  "generate_response": {
+    "request_id": "gen-h-reasoning",
+    "choices": [
+      {
+        "index": 0,
+        "token_ids": [
+          785,
+          1196,
+          17045,
+          369,
+          279,
+          6722,
+          315,
+          9621,
+          13,
+          2938,
+          374,
+          12089,
+          13,
+          151351,
+          785,
+          6722,
+          315,
+          9621,
+          374,
+          12089,
+          13,
+          151329
+        ],
+        "finish_reason": "stop"
+      }
+    ]
+  },
+  "prompt_tokens": 42,
+  "chat_request": {
+    "model": "zai-org/GLM-4.7",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Case h-reasoning. You are a careful assistant that answers in one short sentence and never adds extra commentary beyond what was asked of you."
+      },
+      {
+        "role": "user",
+        "content": "What is the capital of France?"
+      }
+    ],
+    "max_tokens": 64,
+    "temperature": 0,
+    "n": 1
+  }
+}

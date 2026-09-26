@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +13,7 @@ use crate::dispatch::message::SourceMeta;
 use crate::gate::factory::{GateConfigError, GateFactory};
 use crate::merge::{MergeHandle, Source, UnknownPool};
 use crate::store::Store;
+use crate::store::signal::ResultSignal;
 use crate::telemetry::metrics::{Metrics, QueueLabels};
 
 #[derive(Debug, thiserror::Error)]
@@ -53,7 +54,7 @@ pub struct Queues {
     metrics: Arc<Metrics>,
     factory: Arc<GateFactory>,
     merge: MergeHandle,
-    results: Arc<Notify>,
+    results: Arc<ResultSignal>,
     poll_interval: Duration,
     batch_size: usize,
     consume: CancellationToken,
@@ -72,7 +73,7 @@ impl Queues {
         factory: Arc<GateFactory>,
         merge: MergeHandle,
         outcomes: OutcomeSender,
-        results: Arc<Notify>,
+        results: Arc<ResultSignal>,
         poll_interval: Duration,
         batch_size: usize,
         consume: CancellationToken,
@@ -156,9 +157,7 @@ impl Queues {
                 igw_base_url: config.igw_base_url.clone(),
                 request_path: config.request_path_url.clone(),
                 inference_objective: config.inference_objective.clone(),
-                resumable: config.resumable,
-                tool_call_parser: config.tool_call_parser,
-                render_url: config.render_url.clone(),
+                render_url: config.render_url.clone().filter(|_| config.resumable),
             });
             self.merge
                 .add(&config.worker_pool_id, Source { meta, rx })?;

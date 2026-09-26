@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::Deserialize;
 
+use crate::api::routing::RESERVED_ROUTE_PREFIX;
 use crate::config::ConfigError;
 use crate::config::pools::WorkerPools;
-use crate::worker::vllm::ToolCallParser;
 
 pub type GateParams = serde_json::Map<String, serde_json::Value>;
 
@@ -57,17 +57,12 @@ pub struct QueueConfig {
     pub gate_params: GateParams,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    /// Stream eligible completions and chat requests, rebuilding each
-    /// non-streamed response from its stream.
+    /// Send eligible completions and chat requests through vLLM's token
+    /// layer, so an interrupted generation continues from its saved tokens.
     #[serde(default)]
     pub resumable: bool,
-    /// The vLLM `--tool-call-parser` behind this queue. Without it, chat
-    /// requests that offer tools are sent as submitted.
-    #[serde(default)]
-    pub tool_call_parser: Option<ToolCallParser>,
-    /// A vLLM serving this queue's model with `--enable-scale-out`, whose
-    /// render and derender endpoints let interrupted chat requests continue.
-    /// Without it they restart.
+    /// A vLLM serving this queue's model with `--enable-scale-out`, which
+    /// renders and derenders a resumable queue's requests.
     #[serde(default)]
     pub render_url: Option<String>,
 }
@@ -109,6 +104,11 @@ impl TransportConfig {
         if self.result_queue_name.is_empty() {
             return invalid("result_queue_name must not be empty".into());
         }
+        if self.result_queue_name.starts_with(RESERVED_ROUTE_PREFIX) {
+            return invalid(format!(
+                "result_queue_name must not start with {RESERVED_ROUTE_PREFIX:?}"
+            ));
+        }
         if !allow_empty && self.queues.is_empty() {
             return invalid("at least one queue must be configured".into());
         }
@@ -124,6 +124,12 @@ impl TransportConfig {
             if !names.insert(q.queue_name.as_str()) {
                 return invalid(format!("duplicate queue_name {:?}", q.queue_name));
             }
+            if q.result_queue_name.starts_with(RESERVED_ROUTE_PREFIX) {
+                return invalid(format!(
+                    "queue {:?}: result_queue_name must not start with {RESERVED_ROUTE_PREFIX:?}",
+                    q.queue_name
+                ));
+            }
             if q.igw_base_url.is_empty() {
                 return invalid(format!(
                     "queue {:?}: igw_base_url must be specified",
@@ -133,9 +139,9 @@ impl TransportConfig {
             if let Err(e) = reqwest::Url::parse(&q.igw_base_url) {
                 return invalid(format!("queue {:?}: igw_base_url: {e}", q.queue_name));
             }
-            if (q.tool_call_parser.is_some() || q.render_url.is_some()) && !q.resumable {
+            if q.render_url.is_some() != q.resumable {
                 return invalid(format!(
-                    "queue {:?}: tool_call_parser and render_url apply only to resumable queues",
+                    "queue {:?}: a resumable queue needs a render_url, and only it takes one",
                     q.queue_name
                 ));
             }
@@ -163,7 +169,6 @@ impl TransportConfig {
 mod tests {
     use crate::config::pools::{WorkerPoolConfig, WorkerPools};
     use crate::config::transport::TransportConfig;
-    use crate::worker::vllm::ToolCallParser;
 
     fn pools() -> WorkerPools {
         WorkerPools::new(vec![
@@ -194,28 +199,12 @@ mod tests {
     #[test]
     fn resumable_opt_in() {
         let cfg = TransportConfig::parse(
-            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true}]}"#,
-            &pools(),
-            false,
-        )
-        .unwrap();
-        assert!(cfg.queues[0].resumable);
-        assert_eq!(cfg.queues[0].tool_call_parser, None);
-
-        let cfg = TransportConfig::parse(
-            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"tool_call_parser":"glm47"}]}"#,
-            &pools(),
-            false,
-        )
-        .unwrap();
-        assert_eq!(cfg.queues[0].tool_call_parser, Some(ToolCallParser::Glm47));
-
-        let cfg = TransportConfig::parse(
             br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://render:8000"}]}"#,
             &pools(),
             false,
         )
         .unwrap();
+        assert!(cfg.queues[0].resumable);
         assert_eq!(
             cfg.queues[0].render_url.as_deref(),
             Some("http://render:8000")
@@ -223,20 +212,20 @@ mod tests {
 
         for (input, want) in [
             (
-                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","tool_call_parser":"glm45"}]}"#,
-                "tool_call_parser and render_url apply only to resumable queues",
-            ),
-            (
-                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"tool_call_parser":"hermes"}]}"#,
-                "unknown variant `hermes`",
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true}]}"#,
+                "a resumable queue needs a render_url",
             ),
             (
                 r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","render_url":"http://render"}]}"#,
-                "tool_call_parser and render_url apply only to resumable queues",
+                "a resumable queue needs a render_url",
             ),
             (
                 r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"not a url"}]}"#,
                 "render_url",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","resumable":true,"render_url":"http://r","tool_call_parser":"glm47"}]}"#,
+                "unknown field `tool_call_parser`",
             ),
         ] {
             let err = TransportConfig::parse(input.as_bytes(), &pools(), false).unwrap_err();
@@ -275,6 +264,14 @@ mod tests {
             (
                 r#"{"batch_size":0,"queues":[{"queue_name":"q","igw_base_url":"http://gw"}]}"#,
                 "batch_size",
+            ),
+            (
+                r#"{"result_queue_name":"@mine","queues":[{"queue_name":"q","igw_base_url":"http://gw"}]}"#,
+                "result_queue_name must not start with '@'",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","result_queue_name":"@x"}]}"#,
+                "queue \"q\": result_queue_name must not start with '@'",
             ),
             (
                 r#"{"poll_interval_ms":0,"queues":[{"queue_name":"q","igw_base_url":"http://gw"}]}"#,

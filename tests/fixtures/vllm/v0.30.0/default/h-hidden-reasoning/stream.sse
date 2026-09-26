@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":[151331,151333,151335,4207,305,13298,5504,1497,287,13,1446,525,264,16569,17821,429,11248,304,825,2805,11646,323,2581,11362,4960,30490,7797,1128,572,4588,315,498,13,151336,3838,374,279,6722,315,33151,30,151337,151350],"prompt_text":null}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":"The","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":" capital","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":" of","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":" Portugal","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":" is","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":" Lisbon","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{"content":".","reasoning":null},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop","stop_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-afee33eb6abc2da9","object":"chat.completion.chunk","created":1790428495,"model":"zai-org/GLM-4.7","choices":[],"usage":{"prompt_tokens":43,"total_tokens":55,"completion_tokens":12,"completion_tokens_details":{"reasoning_tokens":3}},"system_fingerprint":"vllm-0.30.0-8259f3cd"}
+
+data: [DONE]
+

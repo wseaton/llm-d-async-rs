@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -33,6 +33,7 @@ use crate::merge::{self, PoolSpec};
 use crate::server::{self, AppState, PayloadLimits};
 use crate::store::Store;
 use crate::store::error::StoreError;
+use crate::store::signal::ResultSignal;
 use crate::telemetry::metrics::{Metrics, QueueLabels};
 use crate::tls::{self, TlsError};
 use crate::worker::Worker;
@@ -125,7 +126,7 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
     for pool in pools.iter() {
         metrics.pool_worker_limit(&pool.id, pool.workers);
     }
-    let results = Arc::new(Notify::new());
+    let results = Arc::new(ResultSignal::default());
     let opened = cli.store_config()?.open(Arc::clone(&results)).await?;
     let store = opened.store;
 
@@ -194,6 +195,8 @@ pub async fn run(cli: Cli, shutdown: impl Future<Output = ()>) -> Result<(), Run
             json_body: cli.max_json_body_bytes,
         },
         default_result_queue: transport.result_queue_name.clone(),
+        request_result_ttl: cli.request_result_ttl,
+        facade_timeout: cli.facade_timeout,
         ready: Arc::clone(&ready),
     };
     let servers = TaskTracker::new();

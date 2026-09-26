@@ -5,8 +5,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
-
 use crate::gate::admission::counters::Counters;
 use crate::gate::admission::counters::local::LocalCounters;
 use crate::store::Store;
@@ -18,6 +16,7 @@ use crate::store::embedded::EmbeddedStore;
 use crate::store::error::StoreError;
 use crate::store::postgres::connect::Database;
 use crate::store::postgres::{PgStore, PostgresOptions};
+use crate::store::signal::ResultSignal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -115,7 +114,7 @@ impl StoreConfig {
 
     /// Opens the store. `results` is notified whenever a result is written,
     /// by this process or, on a shared store, any other.
-    pub async fn open(&self, results: Arc<Notify>) -> Result<Opened, StoreError> {
+    pub async fn open(&self, results: Arc<ResultSignal>) -> Result<Opened, StoreError> {
         let location = self.blob_location()?;
         match &self.backend {
             Backend::Embedded { dir } => {

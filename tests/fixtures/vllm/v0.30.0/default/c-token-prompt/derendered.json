@@ -1,0 +1,31 @@
+{
+  "id": "gen-c-token-prompt",
+  "object": "text_completion",
+  "created": 1790428504,
+  "model": "zai-org/GLM-4.7",
+  "choices": [
+    {
+      "index": 0,
+      "text": " understood.",
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null,
+      "prompt_logprobs": null,
+      "prompt_token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 31,
+    "total_tokens": 34,
+    "completion_tokens": 3,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}

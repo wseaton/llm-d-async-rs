@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -17,6 +17,7 @@ use crate::gate::release::Releases;
 use crate::gate::{SharedGate, Verdict};
 use crate::store::error::StoreError;
 use crate::store::queue::{Admission, Admitted};
+use crate::store::signal::ResultSignal;
 use crate::store::{Membership, Store};
 use crate::telemetry::metrics::{GateReason, Metrics, QueueLabels};
 
@@ -35,7 +36,7 @@ pub struct Consumer {
     pub labels: QueueLabels,
     pub gate: SharedGate,
     pub outcomes: OutcomeSender,
-    pub results: Arc<Notify>,
+    pub results: Arc<ResultSignal>,
     pub tx: mpsc::Sender<Claimed>,
     pub poll_interval: Duration,
     pub batch_size: usize,
@@ -208,7 +209,7 @@ impl Consumer {
             .admit(self.config.queue_name.clone(), admissions, now_ms)
             .await?;
         if admitted.contains(&Admitted::Finished) {
-            self.results.notify_waiters();
+            self.results.all();
         }
         // Every claim gets its guard before the first send, so any claim left
         // unsent (shutdown, removed queue) is released when dropped.
@@ -248,7 +249,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
-    use tokio::sync::{Notify, mpsc};
+    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use crate::clock::now_millis;
@@ -288,7 +289,7 @@ mod tests {
                 labels: QueueLabels::new("q", "q", "p"),
                 gate,
                 outcomes,
-                results: Arc::new(Notify::new()),
+                results: Arc::default(),
                 tx,
                 poll_interval: Duration::from_millis(100),
                 batch_size: 10,

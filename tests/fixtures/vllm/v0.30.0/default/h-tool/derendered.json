@@ -1,1 +1,50 @@
-{"id":"chatcmpl-h-tool","object":"chat.completion","created":1790366226,"model":"zai-org/GLM-4.7","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":null,"annotations":null,"audio":null,"function_call":null,"tool_calls":[{"id":"b7cb869731441d5a","type":"function","function":{"name":"get_weather","arguments":"{\"city\": \"Paris\"}"}}],"reasoning":"The user wants live weather, so the weather tool is needed."},"logprobs":null,"finish_reason":"tool_calls","stop_reason":null,"token_ids":null,"routed_experts":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":197,"total_tokens":223,"completion_tokens":26,"prompt_tokens_details":null,"completion_tokens_details":null},"prompt_logprobs":null,"prompt_token_ids":null,"prompt_text":null,"kv_transfer_params":null,"ec_transfer_params":null,"metrics":null}
+{
+  "id": "gen-h-tool",
+  "object": "chat.completion",
+  "created": 1790428505,
+  "model": "zai-org/GLM-4.7",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "9b3679dac6fb0987",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Paris\"}"
+            }
+          }
+        ],
+        "reasoning": "The user wants live weather, so the weather tool is needed."
+      },
+      "logprobs": null,
+      "finish_reason": "stop",
+      "stop_reason": null,
+      "token_ids": null,
+      "routed_experts": null
+    }
+  ],
+  "service_tier": null,
+  "system_fingerprint": null,
+  "usage": {
+    "prompt_tokens": 197,
+    "total_tokens": 223,
+    "completion_tokens": 26,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": null
+  },
+  "prompt_logprobs": null,
+  "prompt_token_ids": null,
+  "prompt_text": null,
+  "kv_transfer_params": null,
+  "ec_transfer_params": null,
+  "metrics": null
+}
