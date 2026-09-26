@@ -4,6 +4,14 @@ This experiment puts [Praxis AI](https://github.com/praxis-proxy/ai) in front of
 llm-d-async so that ordinary agents, SDKs and eval harnesses get queueing,
 priority, deadlines and eviction-safe generation without code changes.
 
+> [!IMPORTANT]
+> The Rust processor used here is experimental. It is a place to prove designs (resume
+> from saved tokens, OpenAI-compatible routes, results by request, the
+> Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
+> What proves out is meant to be upstreamed and, where the project decides it
+> belongs, refactored back into the Go processor. It is not a supported
+> replacement for it.
+
 ```text
  OpenAI SDK / agent ──► Praxis AI ──────────────► llm-d-async ──────────► gateway + EPP ──► vLLM
    Responses API        Responses ⇄ Chat           durable queues          llm-d-router      render
@@ -61,7 +69,12 @@ GPU cluster** (GLM-4.7-Flash on H200s behind llm-d-router); see
 ### Praxis AI (patches in [`praxis-ai/`](praxis-ai))
 
 Against `praxis-proxy/ai` at `b9d60167` (Praxis core 0.7.0), applied in order
-with `git apply`:
+with `git apply`. The same changes are on the fork as commits:
+[`reload-config-on-content-change`](https://github.com/wseaton/ai/tree/reload-config-on-content-change)
+(0001) and
+[`llm-d-async-background`](https://github.com/wseaton/ai/tree/llm-d-async-background)
+(0001 and 0002,
+[diff](https://github.com/praxis-proxy/ai/compare/main...wseaton:ai:llm-d-async-background)).
 
 1. [`0001`](praxis-ai/0001-reload-config-only-when-its-content-changed.patch):
    **config watcher fix.** The watcher observed the config's directory and
@@ -248,6 +261,55 @@ offline; fetch it once. The SDK clients run through `uv`.
   `response_body_mode: none`. The inner gateway stays Envoy-based until it
   does.
 - The Go and Python clients do not expose `result_delivery` or request status.
+
+## Related upstream work
+
+Checked 2026-09-26. Overlaps to settle before proposing any of this upstream:
+
+- **OpenAI routes and results by request (goal 1)** duplicate llm-d's chosen
+  design: the router coordinator's `async-broker` step
+  ([llm-d-router#2325](https://github.com/llm-d/llm-d-router/pull/2325),
+  merged) serves enqueue, wait and passthrough modes with the same
+  `GET /v1/requests/{id}`, and
+  [llm-d-async#394](https://github.com/llm-d/llm-d-async/pull/394) (merged)
+  adds result TTLs and objective stamping. A standalone frontend
+  ([llm-d-async#392](https://github.com/llm-d/llm-d-async/pull/392)) was closed
+  in favor of it.
+- **Resume from tokens (goal 3)** overlaps
+  [llm-d-router#2345](https://github.com/llm-d/llm-d-router/issues/2345), an
+  open coordinator proposal to migrate in-flight completions by appending the
+  generated tokens to the prompt, which lists evict-then-resume as a goal.
+  Eviction itself is
+  [llm-d-router#2061](https://github.com/llm-d/llm-d-router/pull/2061) (design,
+  open). In-flight cancel is
+  [llm-d-async#422](https://github.com/llm-d/llm-d-async/issues/422).
+- **vLLM token layer**: [vllm#56851](https://github.com/vllm-project/vllm/issues/56851)
+  and [vllm#58588](https://github.com/vllm-project/vllm/pull/58588) add
+  `output_mode: text` to generate, which would drop the derender call;
+  [vllm#57593](https://github.com/vllm-project/vllm/issues/57593) tracks
+  derender drifting from native chat responses. The stop token in derendered
+  text is not reported.
+- **Praxis watcher fix (0001)** is
+  [praxis-ai#1015](https://github.com/praxis-proxy/ai/issues/1015); the
+  maintainers want it in core via
+  [praxis#1076](https://github.com/praxis-proxy/praxis/issues/1076), whose
+  watcher already filters paths and hashes content.
+- **Praxis background mode (0002)** conflicts with the plan in
+  [praxis-ai#32](https://github.com/praxis-proxy/ai/issues/32) (assigned,
+  blocked on the core jobs spike
+  [praxis#807](https://github.com/praxis-proxy/praxis/issues/807)), which rules
+  out a direct backend call from the filter, and with
+  [praxis-ai#1323](https://github.com/praxis-proxy/ai/pull/1323) (open), which
+  has the store reject background requests it owns. Cancel is
+  [praxis-ai#45](https://github.com/praxis-proxy/ai/issues/45) and atomic
+  status transitions
+  [praxis-ai#462](https://github.com/praxis-proxy/ai/issues/462).
+  `summary: omit` and `truncation_auto: disabled` go against the fail-closed
+  decisions in [praxis-ai#951](https://github.com/praxis-proxy/ai/issues/951)
+  and [praxis-ai#31](https://github.com/praxis-proxy/ai/issues/31), even as
+  opt-in. Streaming reasoning is the follow-up promised in #31 by its
+  assignee; no PR for it is open. Codex tool compatibility is already
+  upstream.
 
 ## Next
 

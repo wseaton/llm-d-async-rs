@@ -1,5 +1,13 @@
 # llm-d-async (Rust)
 
+> [!IMPORTANT]
+> This Rust processor is experimental. It is a place to prove designs (resume
+> from saved tokens, OpenAI-compatible routes, results by request, the
+> Postgres store) before they go to [llm-d-async](https://github.com/llm-d/llm-d-async).
+> What proves out is meant to be upstreamed and, where the project decides it
+> belongs, refactored back into the Go processor. It is not a supported
+> replacement for it.
+
 An asynchronous dispatch processor for llm-d. Producers submit requests over
 HTTP. They wait in durable queues, pass dispatch gates that watch system
 capacity, and go to an inference gateway (`llm-d-router` or any
