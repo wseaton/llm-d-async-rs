@@ -13,7 +13,9 @@ priority, deadlines and eviction-safe generation without code changes.
 
 Status (2026-09-26): all three goals work end to end against a real vLLM 0.30
 frontend with the official OpenAI SDK, with generate streams evicted
-mid-generation. They have not yet been run on a GPU cluster.
+mid-generation. **Codex CLI runs agentic tasks through the whole stack on the
+GPU cluster** (GLM-4.7-Flash on H200s behind llm-d-router); see
+[Codex](#codex) and [`cluster/`](cluster/README.md).
 
 ## Goals
 
@@ -50,6 +52,9 @@ mid-generation. They have not yet been run on a GPU cluster.
 - **Usage.** Cached prompt tokens come from the generate stream (vLLM with
   `--enable-prompt-tokens-details`), capped at the caller's prompt after a
   resume.
+- **Stop tokens.** A stopped generation's final token (the model's stop token,
+  such as GLM's `<|user|>`) is left out of what derender decodes, as the
+  non-streamed endpoint leaves it out of the text; usage still counts it.
 - **Objective header.** The queue's objective is sent as
   `x-llm-d-inference-objective`; a request's own header replaces it.
 
@@ -64,8 +69,8 @@ with `git apply`:
    to the config reloaded continuously. It now reloads only when the config's
    content changed, and still sees atomic replaces and ConfigMap symlink swaps.
    Includes a regression test that fails without the fix.
-2. [`0002`](praxis-ai/0002-run-background-responses-through-llm-d-async.patch):
-   **background mode and agent compatibility.**
+2. [`0002`](praxis-ai/0002-run-agent-clients-and-background-responses-through-llm-d-async.patch):
+   **background mode, streaming reasoning, and agent compatibility.**
    - `openai_response_store` gains a `background:` section
      (`processor_url`, `queue`, `objective`, `deadline_secs`, `timeout_ms`,
      `allow_private_processor_url`, `reasoning`, `truncation_auto`).
@@ -74,6 +79,11 @@ with `git apply`:
    - `POST /v1/responses/{id}/cancel` is served.
    - Background continuations (`previous_response_id`) replay stored history
      like foreground rehydration.
+   - `responses_to_chat_completions` streams reasoning (the vLLM dialect) as
+     its own output item, with `response.reasoning_text.delta` events ahead of
+     the message; it used to reject streaming whenever a reasoning dialect was
+     configured, and Codex always streams. The terminal matches the
+     non-streaming translation exactly.
    - `reasoning.summary: omit` runs requests that ask for a reasoning summary
      the backend cannot produce, returning reasoning without one.
      `truncation_auto: disabled` runs `truncation: "auto"` untruncated and
@@ -81,6 +91,36 @@ with `git apply`:
      commonly send both.
    - Example config `examples/configs/openai/responses/background-llm-d-async.yaml`
      with functional tests, unit tests, and regenerated filter docs.
+
+## Codex
+
+Codex CLI 0.154 against the cluster stack in [`cluster/`](cluster/README.md),
+with [`codex/config.toml`](codex/config.toml) (Responses wire API through a
+port-forward, hosted web search off):
+
+- "List the files and tell me what calc.py does": Codex listed the directory,
+  read the file, and identified the bug, in 4.5 s.
+- "Fix calc.py so test_calc.py passes, then run the test": six tool calls
+  (read, rewrite, re-read, run `python3 test_calc.py` → `ok`) and a correct
+  summary, in 6.5 s.
+- vLLM counted 90,470 prompt tokens over these runs, of which 79,968 (88%)
+  were prefix-cache hits: Codex resends its whole ~9k-token history each turn,
+  and every attempt reaches vLLM as token IDs that precise prefix routing
+  matches.
+
+What Codex sends, and what it took:
+
+| Codex sends | Handled by |
+|---|---|
+| `stream: true` on every call | streaming reasoning in `responses_to_chat_completions` (patch 0002) |
+| `reasoning.summary: "auto"` | `reasoning.summary: omit` |
+| a `namespace` tool (`multi_agent_v1`) | `openai_client_tool_compat` in the IRR step |
+| the hosted `web_search` tool | `web_search = "disabled"` in Codex's config |
+| `store: false`, full history each turn, `developer` messages, `prompt_cache_key`, `parallel_tool_calls` | translated as is |
+| a model ending turns with `<|user|>` | the processor drops the stop token before derender |
+
+In-cluster service addresses are private, so Praxis needs
+`insecure_options.allow_private_upstreams: true` there.
 
 ## Configuration
 
@@ -191,8 +231,6 @@ offline; fetch it once. The SDK clients run through `uv`.
 - **Streaming is buffered.** A streamed call waits in the queue and gets its
   events at the end, so time to first token is the whole generation. That is
   fine for background agents, and it is what makes resume possible.
-  Separately, Praxis's `responses_to_chat_completions` rejects streaming
-  Responses when a reasoning dialect is configured.
 - **Derender does not report** reasoning-token counts (Praxis reports `0`),
   `stop_reason`, or `system_fingerprint`. Stop strings, stop token IDs, prompt
   truncation, logprobs, seeds, structured output, forced tool choice,
@@ -213,9 +251,9 @@ offline; fetch it once. The SDK clients run through `uv`.
 
 ## Next
 
-1. The 14B cluster run: a multi-turn agent workload through Praxis AI under
-   interactive bursts. Measure resumes, tail latency, and prefix hits with
-   precise routing.
+1. Codex under load: concurrent Codex sessions as `interactive` with a
+   `batch` background load evicted around them, measuring resumes, tail
+   latency and prefix hits.
 2. Upstream: vLLM derender reasoning-token counts (`count_reasoning_tokens`);
    Praxis PRs for patches 0001 and 0002; Praxis ext_proc response-phase
    eviction.

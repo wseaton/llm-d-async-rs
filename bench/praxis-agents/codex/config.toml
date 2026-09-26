@@ -1,0 +1,15 @@
+# Codex CLI pointed at Praxis AI. Use with CODEX_HOME=<this directory>, so your
+# own ~/.codex stays untouched, and PRAXIS_API_KEY set to anything.
+model = "zai-org/GLM-4.7-Flash"
+model_provider = "praxis"
+# The hosted web_search tool has no self-hosted counterpart.
+web_search = "disabled"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[model_providers.praxis]
+name = "praxis"
+base_url = "http://127.0.0.1:18125/v1"
+wire_api = "responses"
+env_key = "PRAXIS_API_KEY"
+stream_idle_timeout_ms = 1800000

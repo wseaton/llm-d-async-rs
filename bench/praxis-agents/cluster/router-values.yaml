@@ -1,0 +1,82 @@
+# helm install agents <llm-d-router v0.10.0>/config/charts/llm-d-router-standalone -f router-values.yaml
+# Flow control with eviction, and precise prefix routing from vLLM KV events.
+router:
+  epp:
+    image: {tag: v0.10.0, pullPolicy: IfNotPresent}
+    flags:
+      v: 2
+    resources:
+      requests: {cpu: "2", memory: 2Gi}
+      limits: {memory: 4Gi}
+    pluginsConfigFile: agents.yaml
+    pluginsCustomConfig:
+      agents.yaml: |
+        apiVersion: llm-d.ai/v1alpha1
+        kind: EndpointPickerConfig
+        featureGates:
+        - flowControl
+        plugins:
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: max-score-picker
+        - type: inflight-load-producer
+        - type: concurrency-detector
+          parameters: {concurrencyMode: requests, maxConcurrency: 16, headroom: 0.0}
+        - type: token-producer
+          parameters:
+            modelName: zai-org/GLM-4.7-Flash
+            vllm: {url: "http://agents-vllm:8000"}
+        - type: endpoint-notification-source
+        - type: metrics-data-source
+        - type: core-metrics-extractor
+        - type: precise-prefix-cache-producer
+          parameters:
+            tokenProcessorConfig: {blockSize: 16}
+            indexerConfig:
+              kvBlockIndexConfig: {enableMetrics: true}
+            kvEventsConfig:
+              discoverPods: true
+              podDiscoveryConfig: {socketPort: 5557}
+        - type: prefix-cache-scorer
+          parameters: {prefixMatchInfoProducerName: precise-prefix-cache-producer}
+        dataLayer:
+          sources:
+          - pluginRef: metrics-data-source
+            extractors:
+            - pluginRef: core-metrics-extractor
+          - pluginRef: endpoint-notification-source
+            extractors:
+            - pluginRef: precise-prefix-cache-producer
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+            weight: 2
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 2
+          - pluginRef: prefix-cache-scorer
+            weight: 3
+          - pluginRef: max-score-picker
+        flowControl:
+          enableEviction: true
+          defaultRequestTTL: 1800s
+          saturationDetector:
+            pluginRef: concurrency-detector
+  modelServers:
+    matchLabels: {app: agents-vllm}
+    targetPorts: [{number: 8000}]
+    protocol: http
+  inferencePool:
+    failureMode: FailClose
+  inferenceObjectives:
+  - {name: batch, priority: -1}
+  - {name: interactive, priority: 10}
+  extraServicePorts:
+  - {name: http, port: 80, protocol: TCP, targetPort: 8081}
+  monitoring:
+    prometheus: {enabled: false, auth: {enabled: false}}
+  proxy:
+    failOpen: false
+    resources:
+      requests: {cpu: "2", memory: 1Gi}
+      limits: {memory: 4Gi}

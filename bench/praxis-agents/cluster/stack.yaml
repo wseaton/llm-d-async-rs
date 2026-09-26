@@ -1,0 +1,243 @@
+# vLLM, llm-d-async and Praxis AI for running agents through the router.
+# Replace PROCESSOR_IMAGE and PRAXIS_IMAGE with digest-pinned refs; see README.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents-vllm
+  labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-vllm}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: agents-vllm}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-vllm}
+    spec:
+      containers:
+        - name: vllm
+          image: docker.io/vllm/vllm-openai:v0.30.0
+          command: ["vllm", "serve"]
+          args: ["zai-org/GLM-4.7-Flash", "--port", "8000",
+                 "--max-model-len", "65536", "--max-num-seqs", "16",
+                 "--reasoning-parser", "glm47", "--tool-call-parser", "glm47", "--enable-auto-tool-choice",
+                 "--enable-prompt-tokens-details", "--enable-scale-out",
+                 "--kv-events-config",
+                 '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557","topic":"kv@$(POD_IP):8000@zai-org/GLM-4.7-Flash"}']
+          env:
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports: [{containerPort: 8000}, {name: kv-events, containerPort: 5557}]
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: "2", memory: 48Gi, nvidia.com/gpu: "1"}
+            limits: {cpu: "8", memory: 96Gi, nvidia.com/gpu: "1"}
+          volumeMounts:
+            - {name: shm, mountPath: /dev/shm}
+            - {name: hf, mountPath: /root/.cache/huggingface}
+      volumes:
+        - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+        - {name: hf, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agents-vllm
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+spec:
+  selector: {app: agents-vllm}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agents-processor
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+data:
+  transport.json: |
+    {"poll_interval_ms": 100, "queues": [
+      {"queue_name": "agents", "igw_base_url": "http://agents-epp:80",
+       "request_path_url": "/v1/chat/completions", "inference_objective": "interactive",
+       "resumable": true, "render_url": "http://agents-vllm:8000"}
+    ]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents-processor
+  labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-processor}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: agents-processor}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-processor}
+    spec:
+      imagePullSecrets: [{name: praxis-agents-quay}]
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: processor
+          image: PROCESSOR_IMAGE
+          args:
+            - --data-dir=/data
+            - --transport-config-file=/config/transport.json
+            - --drain-timeout=10s
+            - --concurrency=256
+            - --request-timeout=30m
+            - --facade-timeout=30m
+          env:
+            - {name: RUST_LOG, value: "info,llm_d_async=debug"}
+          ports:
+            - {name: api, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+            - {name: metrics, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8081}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config}
+          resources:
+            requests: {cpu: "1", memory: 512Mi}
+            limits: {cpu: "4", memory: 2Gi}
+      volumes:
+        - {name: data, emptyDir: {}}
+        - {name: config, configMap: {name: agents-processor}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agents-processor
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+spec:
+  selector: {app: agents-processor}
+  ports:
+    - {name: api, port: 8080, targetPort: 8080}
+    - {name: metrics, port: 9090, targetPort: 9090}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agents-praxis
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+data:
+  praxis.yaml: |
+    listeners:
+      - name: gateway
+        address: "0.0.0.0:8080"
+        filter_chains: [responses]
+    filter_chains:
+      - name: responses
+        filters:
+          - filter: openai_responses_format
+            on_invalid: reject
+            background: continue
+          - filter: openai_responses_validate
+          - filter: state_owner
+            mode: single_tenant
+            tenant_id: default
+          - filter: openai_response_store
+            backend: sqlite
+            database_url: "sqlite:///data/responses.db?mode=rwc"
+            responses_table: openai_responses
+            conversations_table: openai_conversations
+            background:
+              processor_url: "http://agents-processor:8080"
+              allow_private_processor_url: true
+              objective: batch
+              deadline_secs: 3600
+              truncation_auto: disabled
+              reasoning:
+                dialect: vllm
+                summary: omit
+          - filter: openai_responses_rehydrate
+          - filter: iterative_request_router
+            initial_step: inference
+            max_iterations: 1
+            timeout_ms: 1800000
+            steps:
+              - name: inference
+                filters:
+                  - filter: openai_stream_events
+                    timeout_secs: 1800
+                  - filter: openai_client_tool_compat
+                  - filter: responses_to_chat_completions
+                    stream_timeout_secs: 0
+                    truncation_auto: disabled
+                    reasoning:
+                      dialect: vllm
+                      summary: omit
+                  - filter: path_rewrite
+                    replace:
+                      pattern: "^/v1/responses/?$"
+                      replacement: "/v1/chat/completions"
+                    conditions:
+                      - when:
+                          path_prefix: "/v1/responses"
+                          methods: [POST]
+                  - filter: headers
+                    request_set:
+                      - name: x-llm-d-inference-objective
+                        value: interactive
+                      - name: x-llm-d-async-timeout
+                        value: 30m
+                  - filter: router
+                    routes:
+                      - path_prefix: "/"
+                        cluster: llm-d-async
+                  - filter: load_balancer
+                    clusters:
+                      - name: llm-d-async
+                        endpoints:
+                          - "agents-processor:8080"
+                on_result:
+                  - default: true
+                    done: true
+    insecure_options:
+      allow_private_endpoints: true
+      allow_private_upstreams: true # in-cluster services
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agents-praxis
+  labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-praxis}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: agents-praxis}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/part-of: praxis-agents, app: agents-praxis}
+    spec:
+      imagePullSecrets: [{name: praxis-agents-quay}]
+      containers:
+        - name: praxis
+          image: PRAXIS_IMAGE
+          args: ["-c", "/config/praxis.yaml"]
+          env:
+            - {name: RUST_LOG, value: "info"}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /config}
+          resources:
+            requests: {cpu: "1", memory: 512Mi}
+            limits: {cpu: "4", memory: 2Gi}
+      volumes:
+        - {name: data, emptyDir: {}}
+        - {name: config, configMap: {name: agents-praxis}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agents-praxis
+  labels: {app.kubernetes.io/part-of: praxis-agents}
+spec:
+  selector: {app: agents-praxis}
+  ports: [{name: http, port: 8080, targetPort: 8080}]
