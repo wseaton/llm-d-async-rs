@@ -516,7 +516,16 @@ impl Worker {
                     && let Some(end) = self.keep_progress(envelope, labels, streamed.as_ref())
                 {
                     self.record_error(span, error.category.as_str());
-                    tracing::info!(error = %error, "resuming interrupted generation");
+                    let (saved_tokens, resumes) = envelope
+                        .progress
+                        .as_ref()
+                        .map_or((0, 0), |p| (p.token_ids.len(), p.resumes));
+                    tracing::info!(
+                        error = %error,
+                        saved_tokens,
+                        resumes,
+                        "resuming interrupted generation"
+                    );
                     return end;
                 }
                 self.failed(envelope, labels, span, *error)
@@ -613,6 +622,13 @@ impl Worker {
             retry_backoff_secs(envelope.routing.retry_count + 1, secs_left, rand::random());
         let backoff = with_retry_after(backoff, last.retry_after, secs_left, rand::random());
         envelope.routing.retry_count += 1;
+        tracing::info!(
+            error = %last,
+            saved_tokens = envelope.progress.as_ref().map_or(0, |p| p.token_ids.len()),
+            retry_count = envelope.routing.retry_count,
+            backoff_secs = backoff,
+            "retrying request"
+        );
         self.metrics.retry(labels);
         End::Retry(backoff)
     }
