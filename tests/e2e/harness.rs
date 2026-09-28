@@ -314,6 +314,16 @@ impl Spec {
         self.postgres_with_blobs(db, lease, &blobs)
     }
 
+    /// Runs on the shared Redis `r`, in upstream's layout. Claims lapse
+    /// after `lease` and are returned a tenth of that apart.
+    pub fn redis(self, r: &Redis, lease: &str) -> Self {
+        self.arg("--store", "redis")
+            .arg("--redis-url", &r.url)
+            .arg("--blob-store", &r.blob_url())
+            .arg("--claim-lease-ttl", lease)
+            .arg("--claim-reclaim-interval", "500ms")
+    }
+
     pub fn postgres_with_blobs(self, db: &Postgres, lease: &str, blob_store: &str) -> Self {
         self.arg("--store", "postgres")
             .arg("--database-url", &db.url)
@@ -390,6 +400,69 @@ impl Postgres {
             (live.len() == n as usize && live.iter().all(|c| *c == 64 / n)).then_some(())
         })
         .await;
+    }
+}
+
+/// A Redis of the test's own: `redis-server` (or `REDIS_SERVER_BIN`) on a
+/// free port with persistence off. Without the binary, Redis tests are
+/// skipped unless `REQUIRE_REDIS` is set.
+pub struct Redis {
+    pub url: String,
+    pub client: ::redis::Client,
+    _server: Child,
+    /// Stands in for the S3 bucket the replicas share.
+    pub blobs: tempfile::TempDir,
+}
+
+impl Redis {
+    pub async fn start() -> Option<Self> {
+        let bin = std::env::var("REDIS_SERVER_BIN").unwrap_or_else(|_| "redis-server".into());
+        let port = free_port();
+        let spawned = Command::new(&bin)
+            .args(["--port", &port.to_string(), "--bind", "127.0.0.1"])
+            .args(["--save", "", "--appendonly", "no"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+        let server = match spawned {
+            Ok(child) => child,
+            Err(e) => {
+                assert!(
+                    std::env::var_os("REQUIRE_REDIS").is_none(),
+                    "REQUIRE_REDIS is set but {bin} cannot start: {e}"
+                );
+                eprintln!("{bin} unavailable ({e}); skipping a Redis test");
+                return None;
+            }
+        };
+        let url = format!("redis://127.0.0.1:{port}");
+        let client = ::redis::Client::open(url.as_str()).unwrap();
+        eventually("redis-server to answer", || async {
+            let mut conn = client.get_multiplexed_async_connection().await.ok()?;
+            ::redis::cmd("PING")
+                .query_async::<String>(&mut conn)
+                .await
+                .ok()
+        })
+        .await;
+        Some(Self {
+            url,
+            client,
+            _server: server,
+            blobs: tempfile::tempdir().unwrap(),
+        })
+    }
+
+    pub fn blob_url(&self) -> String {
+        format!("file://{}", self.blobs.path().display())
+    }
+
+    pub async fn conn(&self) -> ::redis::aio::MultiplexedConnection {
+        self.client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap()
     }
 }
 

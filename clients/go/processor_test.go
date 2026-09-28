@@ -59,12 +59,12 @@ func pattern(n, mod int) []byte {
 
 // processor is the llm-d-async binary on fresh ports with its own queues.
 type processor struct {
-	api      string
-	queue    string
-	gated    string
-	results  string
-	budget   string
-	postgres bool
+	api         string
+	queue       string
+	gated       string
+	results     string
+	budget      string
+	objectBlobs bool
 }
 
 func binary(t *testing.T) string {
@@ -90,14 +90,33 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func startProcessor(t *testing.T, up *upstream, postgresURL string) *processor {
+// storeArgs picks the processor's store; dir is the test's own directory.
+type storeArgs func(dir string) []string
+
+func postgresStore(url string) storeArgs {
+	return func(dir string) []string {
+		return []string{"--store", "postgres", "--database-url", url,
+			"--database-max-connections", "4", "--partition-lease-ttl", "3s",
+			"--blob-store", "file://" + filepath.Join(dir, "blobs")}
+	}
+}
+
+func redisStore(url string) storeArgs {
+	return func(dir string) []string {
+		return []string{"--store", "redis", "--redis-url", url,
+			"--blob-store", "file://" + filepath.Join(dir, "blobs"),
+			"--claim-reclaim-interval", "500ms"}
+	}
+}
+
+func startProcessor(t *testing.T, up *upstream, store storeArgs) *processor {
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	p := &processor{
-		queue:    "q-" + suffix,
-		gated:    "gated-" + suffix,
-		results:  "results-" + suffix,
-		budget:   "budget-" + suffix,
-		postgres: postgresURL != "",
+		queue:       "q-" + suffix,
+		gated:       "gated-" + suffix,
+		results:     "results-" + suffix,
+		budget:      "budget-" + suffix,
+		objectBlobs: store != nil,
 	}
 	transport := map[string]any{
 		"poll_interval_ms":  50,
@@ -127,10 +146,8 @@ func startProcessor(t *testing.T, up *upstream, postgresURL string) *processor {
 			"--health-port", fmt.Sprint(health),
 			"--metrics-port", fmt.Sprint(metrics),
 		}
-		if p.postgres {
-			args = append(args, "--store", "postgres", "--database-url", postgresURL,
-				"--database-max-connections", "4", "--partition-lease-ttl", "3s",
-				"--blob-store", "file://"+filepath.Join(dir, "blobs"))
+		if store != nil {
+			args = append(args, store(dir)...)
 		}
 		log, err := os.Create(filepath.Join(dir, fmt.Sprintf("processor-%d.log", attempt)))
 		if err != nil {
@@ -202,7 +219,7 @@ func stores(t *testing.T, fn func(t *testing.T, up *upstream, p *processor)) {
 	t.Run("embedded", func(t *testing.T) {
 		t.Parallel()
 		up := newUpstream(t)
-		fn(t, up, startProcessor(t, up, ""))
+		fn(t, up, startProcessor(t, up, nil))
 	})
 	t.Run("postgres", func(t *testing.T) {
 		t.Parallel()
@@ -214,7 +231,7 @@ func stores(t *testing.T, fn func(t *testing.T, up *upstream, p *processor)) {
 			t.Skip("TEST_DATABASE_URL not set")
 		}
 		up := newUpstream(t)
-		fn(t, up, startProcessor(t, up, url))
+		fn(t, up, startProcessor(t, up, postgresStore(url)))
 	})
 }
 

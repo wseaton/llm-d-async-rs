@@ -24,8 +24,15 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/lda_test?sslmode=disable
       REQUIRE_POSTGRES: "1"
+      REQUIRE_REDIS: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: redis-server
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q redis-server
+          sudo systemctl stop redis-server
+          redis-server --version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

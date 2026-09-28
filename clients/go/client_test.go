@@ -163,7 +163,7 @@ func TestStreamedBodyAndResultByReference(t *testing.T) {
 		if r.RequestToken == "" {
 			t.Fatal("result carries no request token")
 		}
-		if p.postgres != strings.HasPrefix(r.PayloadLocation, "file://") {
+		if p.objectBlobs != strings.HasPrefix(r.PayloadLocation, "file://") {
 			t.Fatalf("location %q: want an object store URL exactly when the processor uses one", r.PayloadLocation)
 		}
 		if r.PayloadRef == "" || r.ContentType != "audio/mpeg" || r.PayloadSize != int64(len(up.audio)) ||

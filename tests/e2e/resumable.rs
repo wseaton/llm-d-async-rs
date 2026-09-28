@@ -1,9 +1,12 @@
 //! Resumable queues against a real vLLM: the processor renders, generates
-//! and derenders through it, and the gateway in between evicts streams.
+//! and derenders through it, and the gateway in between evicts streams. The
+//! same scenarios run on every store, so their durability can be compared.
+
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::harness::{JsonBody, Processor, Spec, now_secs};
+use crate::harness::{JsonBody, Postgres, Processor, Redis, Spec, now_secs};
 use crate::vllm::{Case, Gateway, Generate, Vllm, case};
 
 const RESULTS: &str = "result-list";
@@ -70,18 +73,63 @@ async fn metric(p: &Processor, name: &str) -> f64 {
     p.metric(name, &[("queue_name", "r")]).await.unwrap_or(0.0)
 }
 
+/// The store a run uses. Shared stores return a dead replica's claims
+/// once this lease lapses.
+enum Backend {
+    Embedded,
+    Postgres(Postgres),
+    Redis(Redis),
+}
+
+const LEASE: &str = "3s";
+
+impl Backend {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Postgres(_) => "postgres",
+            Self::Redis(_) => "redis",
+        }
+    }
+
+    fn spec(&self, gateway: &Gateway) -> Spec {
+        let spec = Spec::new(transport(gateway)).arg("--drain-timeout", "1s");
+        match self {
+            Self::Embedded => spec,
+            Self::Postgres(db) => spec.postgres(db, LEASE),
+            Self::Redis(r) => spec.redis(r, LEASE),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn resumable_queues_against_real_vllm() {
+async fn resumable_queues_on_the_embedded_store() {
+    scenarios(Backend::Embedded).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumable_queues_on_postgres() {
+    let Some(db) = Postgres::schema().await else {
+        return;
+    };
+    scenarios(Backend::Postgres(db)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resumable_queues_on_redis() {
+    let Some(r) = Redis::start().await else {
+        return;
+    };
+    scenarios(Backend::Redis(r)).await;
+}
+
+async fn scenarios(backend: Backend) {
     let Some(vllm) = Vllm::start().await else {
         return;
     };
     let gateway = Gateway::start(&vllm.url).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut p = Processor::start(
-        dir.path(),
-        Spec::new(transport(&gateway)).arg("--drain-timeout", "1s"),
-    )
-    .await;
+    let mut p = Processor::start(dir.path(), backend.spec(&gateway)).await;
 
     let cases = [case("chat"), case("completion"), case("tool")];
     let mut want = Vec::new();
@@ -229,4 +277,94 @@ async fn resumable_queues_against_real_vllm() {
             .concat()
         )
     );
+
+    // A replica killed mid-generation saved nothing: its claim returns to
+    // the queue when the store gives it up, and the generation restarts.
+    gateway.clear();
+    gateway.then(Generate::Stall(chat.cut));
+    p.submit(submission("killed", chat)).await;
+    crate::harness::eventually("the stalled stream", || async {
+        (gateway.forwarded_to(GENERATE).len() == 1).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let killed = Instant::now();
+    p.kill().await;
+    p.spawn().await;
+    assert_eq!(comparable(body(&p.next_result(RESULTS).await)), want[0]);
+    let redelivered = killed.elapsed();
+    let sent = gateway.forwarded_to(GENERATE);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["token_ids"], json!(chat.prompt_token_ids));
+    eprintln!(
+        "{}: a request held by a killed replica finished {redelivered:?} after the kill",
+        backend.name()
+    );
+
+    if let Backend::Redis(r) = &backend {
+        go_producer_request(r, &gateway, chat, &want[0]).await;
+    }
+}
+
+/// A request submitted the way upstream's Go producer submits it is served
+/// through the token layer and answered into its per-request mailbox, the
+/// way the llm-d-router coordinator's async-broker reads it.
+async fn go_producer_request(r: &Redis, gateway: &Gateway, chat: &Case, want: &Value) {
+    gateway.clear();
+    gateway.then(Generate::Cut(chat.cut));
+    let (id, token) = ("acme:job-1", "9f86d081884c7d659a2feaa0c55ad015");
+    let mailbox = format!("results:req:{id}");
+    let deadline = now_secs() + 120;
+    let member = json!({
+        "internal": {"request_token": token, "request_queue_name": "r", "result_queue_name": mailbox},
+        "request_kind": "redis",
+        "data": {
+            "id": id, "created": now_secs(), "deadline": deadline, "payload": chat.request,
+            "metadata": {"userid": "acme"}, "endpoint": chat.endpoint,
+            "request_queue_name": "r", "result_queue_name": mailbox,
+        },
+    });
+    let mut conn = r.conn().await;
+    let () = ::redis::pipe()
+        .atomic()
+        .del(format!("request-cancel:{id}"))
+        .ignore()
+        .cmd("SET")
+        .arg(format!("request-active:{id}"))
+        .arg(token)
+        .arg("EX")
+        .arg(120)
+        .ignore()
+        .zadd("r", member.to_string(), deadline)
+        .ignore()
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let head: Vec<String> = crate::harness::eventually("the mailbox result", || {
+        let mut conn = conn.clone();
+        let mailbox = mailbox.clone();
+        async move {
+            let head: Vec<String> = ::redis::cmd("LRANGE")
+                .arg(&mailbox)
+                .arg(0)
+                .arg(0)
+                .query_async(&mut conn)
+                .await
+                .ok()?;
+            (!head.is_empty()).then_some(head)
+        }
+    })
+    .await;
+    let result: Value = serde_json::from_str(&head[0]).unwrap();
+    assert_eq!(result["id"], id);
+    assert_eq!(result["request_token"], token);
+    assert_eq!(comparable(body(&result)), *want);
+    let sent = gateway.forwarded_to(GENERATE);
+    assert_eq!(sent.len(), 2, "evicted once and resumed");
+    let active: bool = ::redis::cmd("EXISTS")
+        .arg(format!("request-active:{id}"))
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(!active, "the coordinator sees the request finished");
 }

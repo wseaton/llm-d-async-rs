@@ -12,15 +12,18 @@ HTTP. They wait in durable queues, pass dispatch gates that watch system
 capacity, and go to an inference gateway (`llm-d-router` or any
 OpenAI-compatible endpoint). Results come back through the same API.
 
-Queues live in one of two stores:
+Queues live in one of three stores:
 
 - **embedded**: [redb](https://github.com/cberner/redb) in a local directory,
   owned by one process. No other service.
 - **postgres**: shared by any number of replicas, which split each queue
   between them and take over each other's work.
+- **redis**: upstream llm-d-async's `redis-sortedset` layout, shared by any
+  number of replicas and by Go producers, Go dispatchers and the llm-d-router
+  coordinator's async-broker.
 
-This is a rewrite of the Go processor. The Redis and Pub/Sub transports are
-replaced by these stores, and the processor owns its queues. Gates, merge
+This is a rewrite of the Go processor. Its Pub/Sub transport is not ported;
+its Redis layout is one of the stores. Gates, merge
 policies, retries, deadlines, metrics, and tracing match the Go version
 except where noted under [Differences from the Go processor](#differences-from-the-go-processor).
 
@@ -91,13 +94,49 @@ counted per heartbeated holder: a dead replica's slots free themselves when
 its holder lapses. Every replica reports the whole queue's depth and
 deadline proximity, so aggregate those metrics with `max`, not `sum`.
 
+**Redis.** The keys, their encoding and the Lua scripts that change them are
+upstream llm-d-async's (`<queue>` sorted by deadline, `<queue>:claimed`,
+`:claim-owners`, `:claims-idx`, `retry-sortedset`, result lists,
+`request-active:` and `request-cancel:`), so a Go producer, a Go dispatcher
+and the coordinator's async-broker can share queues with this processor. A
+request is peeked, then claimed with upstream's claim script. A claim is a
+lease (`--claim-lease-ttl`, 300s) its holder renews every third of it; any
+replica returns a lapsed claim to its queue within `--claim-reclaim-interval`.
+Each claim's owner token fences its outcome.
+
+Where this store differs from upstream's dispatcher, it does so without
+changing what another party reads:
+
+- A retry ends its claim in the same script that parks the request, so a
+  replica dying during the backoff leaves one copy, not two.
+- Saved generation progress lives in `request-progress:<id>:<token>`, apart
+  from the envelope, so a Go dispatcher re-serializing the envelope on a
+  retry cannot drop it.
+- JSON payloads travel inline, as upstream main writes them; llm-d-async#458's
+  `request-payload:` keys are read too. Other bodies go to the blob store,
+  named by `internal.payload_ref` (`blob://requests/<token>`), which Go
+  dispatchers cannot read.
+- Expiry is set as absolute times (`PXAT`, `PEXPIREAT`) from deadlines and
+  the store's clock, which is what upstream's `EX`/`EXPIRE` amount to.
+- Blob references, result claim IDs and control values live under
+  `llm-d-async:`; result writes are announced on `llm-d-async:results`, so
+  long polls on every replica wake. Results a Go dispatcher writes wake them
+  at the next poll.
+
+Quota gates count with upstream's `redis-quota` scripts on upstream's keys
+(`<prefix><attribute>:<tenant>`): concurrency slots are shared with Go
+dispatchers and the coordinator's passthrough quota, and freed by
+`--quota-slot-ttl` if a holder dies. Rate windows keep one log per window
+length (`<key>:<window_ms>`), so they are not shared with a Go rate-limit
+gate. Needs Redis 7 or later, a single node (not Cluster).
+
 **Blob stores.** Request bodies over `--inline-payload-limit` and binary
 results are stored apart from the queue:
 
 | `--blob-store` | where | with |
 |---|---|---|
 | `local` (embedded default) | files under `--data-dir/blobs` | embedded only |
-| `s3://bucket/prefix`, `gs://…`, `az://…`, `file:///…` | an object store | Postgres (required) |
+| `s3://bucket/prefix`, `gs://…`, `az://…`, `file:///…` | an object store | Postgres and Redis (required) |
 | `postgres` | 1 MiB rows in the same database | Postgres, development only |
 
 The Postgres store has no default blob store: audio and long prompts would
@@ -116,13 +155,18 @@ were written. Set a lifecycle rule to abort incomplete multipart uploads.
 
 | flag | default | |
 |---|---|---|
-| `--store` | `embedded` | `embedded` or `postgres` |
+| `--store` | `embedded` | `embedded`, `postgres` or `redis` |
 | `--data-dir` | `data` | embedded store and local blobs |
 | `--database-url` / `DATABASE_URL` | | Postgres URL; TLS follows its `sslmode` |
 | `--database-max-connections` | 32 | per replica |
 | `--database-ca-cert` | | extra CA for Postgres (native TLS) |
 | `--partition-lease-ttl` | 30s | how long a dead replica's partitions, claims and quota slots stay held |
-| `--blob-store` / `BLOB_STORE` | `local` (embedded) | required with Postgres; see [Blob stores](#stores-and-replicas) |
+| `--redis-url` / `REDIS_URL` | | Redis URL; `rediss://` for TLS |
+| `--redis-retry-queue` | `retry-sortedset` | where retries wait, shared with Go dispatchers |
+| `--claim-lease-ttl` | 300s | how long a dead replica's Redis claims stay held |
+| `--claim-reclaim-interval` | 15s | how often lapsed Redis claims return to their queues |
+| `--quota-slot-ttl` | 300s | how long a Redis quota counter outlives its last use |
+| `--blob-store` / `BLOB_STORE` | `local` (embedded) | required with Postgres and Redis; see [Blob stores](#stores-and-replicas) |
 | `--api-addr` | `0.0.0.0:8080` | producer/consumer API |
 | `--health-port` / `--metrics-port` | 8081 / 9090 | `/healthz`, `/readyz` / `/metrics` |
 | `--concurrency` | 64 | workers in the default pool when no pool file is given |
@@ -293,11 +337,33 @@ Go gates. With the aliases, a Redis `address` is ignored. Quota gates that
 share a `prefix` and `attribute` share per-tenant counters, keyed
 `<prefix><attribute>:<value>` as the Redis keys were.
 
+## Stores compared
+
+The same scenarios run on each store: the store conformance suite
+(`src/store/conformance.rs`, 30 cases) and the resume e2e
+(`tests/e2e/resumable.rs`) against a real vLLM, including a `kill -9` in the
+middle of a generation. Where a row differs, it is a property of the store,
+pinned by a test.
+
+| | embedded | Postgres | Redis |
+|---|---|---|---|
+| replicas | one per data directory | any | any |
+| evicted stream resumes from saved tokens | yes | yes | yes |
+| drain (SIGTERM) saves progress for the next replica | yes | yes | yes |
+| `kill -9`: request held by the dead process redelivered after | reopen (0.35 s in the e2e) | `--partition-lease-ttl` (30s; 3.4 s with 3s in the e2e) | `--claim-lease-ttl` (300s; 2.9 s with 3s in the e2e) |
+| `kill -9`: output generated so far | lost, the generation restarts | lost | lost |
+| outcome from a dead or stale holder | fenced | fenced | fenced |
+| result TTL | per result | per result | per result list (upstream) |
+| same-deadline requests | submission order | submission order | member bytes (upstream) |
+| Go producers, Go dispatchers, coordinator async-broker | no | no | yes: upstream's producer drives it (`clients/go/redis_interop_test.go`) |
+| quota slots shared with the coordinator | no | no | yes |
+| cross-replica result wake-up | n/a | LISTEN/NOTIFY | pub/sub; Go-written results at the next poll |
+
 ## Differences from the Go processor
 
-- **No Redis, no Pub/Sub.** Queues live in the embedded store (one process)
-  or Postgres (many replicas, split by partition leases instead of Redis
-  claim leases).
+- **Three stores.** The embedded store (one process) and Postgres (many
+  replicas, split by partition leases) are new; the Redis store keeps Go's
+  `redis-sortedset` layout. No Pub/Sub.
 - **A connection that fails before response headers is retried.** Go failed
   the request, so a model pod dying during a non-streamed generation lost it.
 - **Unknown `gate_type` is a startup error.** Go silently used an open gate,
@@ -306,8 +372,9 @@ share a `prefix` and `attribute` share per-tenant counters, keyed
 - **Deadline expiry uses the deadline's own instant** everywhere. Go compared
   whole seconds, so a request could be sent during its final second and
   aborted at once.
-- **Result TTL expires each result** `result_ttl_seconds` after it is written.
-  Go expired the whole result list after its last write.
+- **Result TTL expires each result** `result_ttl_seconds` after it is written,
+  on the embedded and Postgres stores. Go, and the Redis store, expire the
+  whole result list after its last write.
 - **Budget-limited polls still count `gate_closed`**, as in Go. Polling is
   paced by `poll_interval_ms`, as in Go.
 - **Not ported:** GCP Pub/Sub and its GCS multipart transform, Redis Pub/Sub,
