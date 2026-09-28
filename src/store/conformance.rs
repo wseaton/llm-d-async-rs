@@ -17,7 +17,26 @@ use crate::store::queue::{
 use crate::store::staging::PayloadSink;
 use crate::store::test_support::{envelope, new_request};
 
+/// The clock of backend-specific store tests.
 pub const NOW_MS: i64 = 1_000_000;
+
+/// Second 0 of the conformance cases' timeline. The cases run in the year
+/// 2100, so a backend that turns their deadlines and TTLs into real expiry
+/// times (Redis) never sees one fire during a test.
+const BASE_S: i64 = 4_102_443_800;
+
+/// The conformance cases' clock: second 1000 of their timeline.
+pub const CLOCK_MS: i64 = (BASE_S + 1000) * 1000;
+
+/// Second `s` of the cases' timeline, as a deadline.
+fn at(s: i64) -> i64 {
+    BASE_S + s
+}
+
+/// Millisecond `ms` of the cases' timeline.
+fn at_ms(ms: i64) -> i64 {
+    BASE_S * 1000 + ms
+}
 
 macro_rules! conformance_tests {
     ($fixture:path) => {
@@ -71,7 +90,7 @@ pub(crate) use conformance_tests;
 
 async fn claim_head(store: &Store, queue: &str) -> (Peeked, ClaimRef) {
     store.join(queue).await.unwrap();
-    let mut peeked = store.peek(queue.into(), 1, NOW_MS).await.unwrap();
+    let mut peeked = store.peek(queue.into(), 1, CLOCK_MS).await.unwrap();
     let head = peeked.remove(0);
     let env = head.envelope.clone().unwrap();
     let admitted = store
@@ -81,7 +100,7 @@ async fn claim_head(store: &Store, queue: &str) -> (Peeked, ClaimRef) {
                 key: head.key,
                 generation: env.generation_key(),
             }],
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
@@ -94,7 +113,7 @@ async fn claim_head(store: &Store, queue: &str) -> (Peeked, ClaimRef) {
 async fn peek_ids(store: &Store, queue: &str, limit: usize) -> Vec<String> {
     store.join(queue).await.unwrap();
     store
-        .peek(queue.into(), limit, NOW_MS)
+        .peek(queue.into(), limit, CLOCK_MS)
         .await
         .unwrap()
         .into_iter()
@@ -118,7 +137,7 @@ async fn blob_request(store: &Store, id: &str, token: &str, body: &[u8]) -> NewR
     let mut sink = PayloadSink::new(store.blobs().clone(), token, 8, 1 << 20);
     sink.push(body).await.unwrap();
     let payload = sink.finish().await.unwrap();
-    let mut env = envelope(id, token, "q", 100);
+    let mut env = envelope(id, token, "q", at(100));
     env.payload = payload.info("audio/wav");
     NewRequest {
         envelope: env,
@@ -140,11 +159,11 @@ async fn write_blob(store: &Store, key: &BlobKey, body: &'static [u8]) -> Stored
 }
 
 pub async fn a_claim_carries_an_inline_body_but_not_a_blob(store: Store) {
-    let inline = new_request("small", "q", 100);
+    let inline = new_request("small", "q", at(100));
     let blob = blob_request(&store, "large", "0a", b"0123456789").await;
     store.submit(vec![inline, blob]).await.unwrap();
     store.join("q").await.unwrap();
-    let peeked = store.peek("q".into(), 10, NOW_MS).await.unwrap();
+    let peeked = store.peek("q".into(), 10, CLOCK_MS).await.unwrap();
     let ids: Vec<String> = peeked
         .iter()
         .map(|p| p.envelope.as_ref().unwrap().request.id.clone())
@@ -156,7 +175,7 @@ pub async fn a_claim_carries_an_inline_body_but_not_a_blob(store: Store) {
             generation: p.envelope.as_ref().unwrap().generation_key(),
         })
         .collect();
-    let admitted = store.admit("q".into(), admissions, NOW_MS).await.unwrap();
+    let admitted = store.admit("q".into(), admissions, CLOCK_MS).await.unwrap();
     let payloads: std::collections::BTreeMap<String, Option<Bytes>> = ids
         .into_iter()
         .zip(admitted)
@@ -175,31 +194,31 @@ pub async fn a_claim_carries_an_inline_body_but_not_a_blob(store: Store) {
 pub async fn peek_orders_by_deadline_then_submission(store: Store) {
     store
         .submit(vec![
-            new_request("late", "q", 300),
-            new_request("early", "q", 100),
-            new_request("other-queue", "r", 1),
-            new_request("early2", "q", 100),
+            new_request("late", "q", at(300)),
+            new_request("early", "q", at(100)),
+            new_request("other-queue", "r", at(1)),
+            new_request("early2", "q", at(100)),
         ])
         .await
         .unwrap();
     assert_eq!(peek_ids(&store, "q", 10).await, ["early", "early2", "late"]);
     assert_eq!(peek_ids(&store, "q", 2).await, ["early", "early2"]);
-    assert!(store.has_pending("r".into(), NOW_MS).await.unwrap());
-    assert!(!store.has_pending("nope".into(), NOW_MS).await.unwrap());
+    assert!(store.has_pending("r".into(), CLOCK_MS).await.unwrap());
+    assert!(!store.has_pending("nope".into(), CLOCK_MS).await.unwrap());
 }
 
 pub async fn peek_reports_cancellation(store: Store) {
     store
         .submit(vec![
-            new_request("a", "q", 2_000),
-            new_request("b", "q", 2_000),
+            new_request("a", "q", at(2_000)),
+            new_request("b", "q", at(2_000)),
         ])
         .await
         .unwrap();
-    assert_eq!(store.cancel(vec!["b".into()], NOW_MS).await.unwrap(), 1);
+    assert_eq!(store.cancel(vec!["b".into()], CLOCK_MS).await.unwrap(), 1);
     store.join("q").await.unwrap();
     let flags: Vec<(String, bool)> = store
-        .peek("q".into(), 10, NOW_MS)
+        .peek("q".into(), 10, CLOCK_MS)
         .await
         .unwrap()
         .into_iter()
@@ -210,11 +229,11 @@ pub async fn peek_reports_cancellation(store: Store) {
 
 pub async fn claim_removes_from_queue_and_payload_stays_readable(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     let (head, _) = claim_head(&store, "q").await;
-    assert!(!store.has_pending("q".into(), NOW_MS).await.unwrap());
+    assert!(!store.has_pending("q".into(), CLOCK_MS).await.unwrap());
     assert!(peek_ids(&store, "q", 10).await.is_empty());
     let env = head.envelope.unwrap();
     assert_eq!(
@@ -225,11 +244,11 @@ pub async fn claim_removes_from_queue_and_payload_stays_readable(store: Store) {
 
 pub async fn admitting_a_row_twice_reports_gone(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     store.join("q").await.unwrap();
-    let head = store.peek("q".into(), 1, NOW_MS).await.unwrap().remove(0);
+    let head = store.peek("q".into(), 1, CLOCK_MS).await.unwrap().remove(0);
     let generation = head.envelope.unwrap().generation_key();
     let out = store
         .admit(
@@ -238,7 +257,7 @@ pub async fn admitting_a_row_twice_reports_gone(store: Store) {
                 Admission::Discard { key: head.key },
                 Admission::Discard { key: head.key },
             ],
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
@@ -250,7 +269,7 @@ pub async fn admitting_a_row_twice_reports_gone(store: Store) {
                 key: head.key,
                 generation,
             }],
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
@@ -259,11 +278,14 @@ pub async fn admitting_a_row_twice_reports_gone(store: Store) {
 
 pub async fn finish_at_admission_writes_a_result(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100), new_request("b", "q", 200)])
+        .submit(vec![
+            new_request("a", "q", at(100)),
+            new_request("b", "q", at(200)),
+        ])
         .await
         .unwrap();
     store.join("q").await.unwrap();
-    let peeked = store.peek("q".into(), 2, NOW_MS).await.unwrap();
+    let peeked = store.peek("q".into(), 2, CLOCK_MS).await.unwrap();
     let mut admissions = Vec::new();
     for p in peeked {
         let env = p.envelope.unwrap();
@@ -273,15 +295,18 @@ pub async fn finish_at_admission_writes_a_result(store: Store) {
             envelope: Box::new(env),
         });
     }
-    let out = store.admit("q".into(), admissions, NOW_MS).await.unwrap();
+    let out = store.admit("q".into(), admissions, CLOCK_MS).await.unwrap();
     assert_eq!(out, [Admitted::Finished, Admitted::Finished]);
-    assert!(!store.has_pending("q".into(), NOW_MS).await.unwrap());
+    assert!(!store.has_pending("q".into(), CLOCK_MS).await.unwrap());
     assert_eq!(
-        store.result_depth("results".into(), NOW_MS).await.unwrap(),
+        store
+            .result_depth("results".into(), CLOCK_MS)
+            .await
+            .unwrap(),
         2
     );
     let first = store
-        .pop_result("results".into(), NOW_MS)
+        .pop_result("results".into(), CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
@@ -293,27 +318,30 @@ pub async fn discard_removes_the_row_and_its_blob(store: Store) {
     let key = BlobKey::request("0a").unwrap();
     store.submit(vec![req]).await.unwrap();
     store.join("q").await.unwrap();
-    let head = store.peek("q".into(), 1, NOW_MS).await.unwrap().remove(0);
+    let head = store.peek("q".into(), 1, CLOCK_MS).await.unwrap().remove(0);
     let out = store
         .admit(
             "q".into(),
             vec![Admission::Discard { key: head.key }],
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
     assert_eq!(out, [Admitted::Finished]);
-    assert!(!store.has_pending("q".into(), NOW_MS).await.unwrap());
+    assert!(!store.has_pending("q".into(), CLOCK_MS).await.unwrap());
     assert!(!blob_exists(&store, &key).await);
     assert_eq!(
-        store.result_depth("results".into(), NOW_MS).await.unwrap(),
+        store
+            .result_depth("results".into(), CLOCK_MS)
+            .await
+            .unwrap(),
         0
     );
 }
 
 pub async fn finish_writes_result_and_clears_request_state(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     let (head, claim) = claim_head(&store, "q").await;
@@ -327,13 +355,13 @@ pub async fn finish_writes_result_and_clears_request_state(store: Store) {
                 result: result.clone(),
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
     assert_eq!(applied.result_routes.len(), 1);
     let body = store
-        .pop_result("results".into(), NOW_MS)
+        .pop_result("results".into(), CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
@@ -343,12 +371,12 @@ pub async fn finish_writes_result_and_clears_request_state(store: Store) {
     );
     assert!(payload_bytes(&store, &env).await.is_none());
     let applied = store
-        .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim }].into(), CLOCK_MS)
         .await
         .unwrap();
     assert_eq!(applied.fenced, 1);
-    assert!(!store.has_pending("q".into(), NOW_MS).await.unwrap());
-    assert_eq!(store.cancel(vec!["a".into()], NOW_MS).await.unwrap(), 0);
+    assert!(!store.has_pending("q".into(), CLOCK_MS).await.unwrap());
+    assert_eq!(store.cancel(vec!["a".into()], CLOCK_MS).await.unwrap(), 0);
 }
 
 pub async fn blob_payload_lives_until_the_result_is_written(store: Store) {
@@ -370,7 +398,7 @@ pub async fn blob_payload_lives_until_the_result_is_written(store: Store) {
                 envelope: env.clone(),
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
@@ -389,17 +417,17 @@ pub async fn blob_payload_survives_retry_and_release(store: Store) {
             vec![Outcome::Retry {
                 claim,
                 envelope: head.envelope.unwrap(),
-                due_ms: NOW_MS,
+                due_ms: CLOCK_MS,
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
-    store.promote_due_retries(NOW_MS, 10).await.unwrap();
+    store.promote_due_retries(CLOCK_MS, 10).await.unwrap();
     let (head, claim) = claim_head(&store, "q").await;
     store
-        .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim }].into(), CLOCK_MS)
         .await
         .unwrap();
     let env = head.envelope.unwrap();
@@ -408,7 +436,7 @@ pub async fn blob_payload_survives_retry_and_release(store: Store) {
 
 pub async fn fenced_result_blob_is_deleted(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     let (head, claim) = claim_head(&store, "q").await;
@@ -428,7 +456,7 @@ pub async fn fenced_result_blob_is_deleted(store: Store) {
                 result,
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
@@ -438,7 +466,7 @@ pub async fn fenced_result_blob_is_deleted(store: Store) {
 
 pub async fn replayed_finish_keeps_its_result_blob(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     let (head, claim) = claim_head(&store, "q").await;
@@ -451,22 +479,28 @@ pub async fn replayed_finish_keeps_its_result_blob(store: Store) {
         envelope: env,
     };
     let first = store
-        .apply_outcomes(vec![finish.clone()].into(), NOW_MS)
+        .apply_outcomes(vec![finish.clone()].into(), CLOCK_MS)
         .await
         .unwrap();
     assert_eq!(first.result_routes.len(), 1);
     let replay = store
-        .apply_outcomes(vec![finish].into(), NOW_MS)
+        .apply_outcomes(vec![finish].into(), CLOCK_MS)
         .await
         .unwrap();
     assert_eq!(replay.fenced, 1);
     assert!(blob_exists(&store, &key).await);
-    assert!(store.open_result_blob(key, NOW_MS).await.unwrap().is_some());
+    assert!(
+        store
+            .open_result_blob(key, CLOCK_MS)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 pub async fn stale_claim_id_is_fenced(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     let (_, claim) = claim_head(&store, "q").await;
@@ -475,24 +509,27 @@ pub async fn stale_claim_id_is_fenced(store: Store) {
         ..claim
     };
     let applied = store
-        .apply_outcomes(vec![Outcome::Release { claim: stale }].into(), NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim: stale }].into(), CLOCK_MS)
         .await
         .unwrap();
     assert_eq!(applied.fenced, 1);
-    assert!(!store.has_pending("q".into(), NOW_MS).await.unwrap());
+    assert!(!store.has_pending("q".into(), CLOCK_MS).await.unwrap());
 }
 
 pub async fn release_restores_the_original_position(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100), new_request("b", "q", 200)])
+        .submit(vec![
+            new_request("a", "q", at(100)),
+            new_request("b", "q", at(200)),
+        ])
         .await
         .unwrap();
     let (head, claim) = claim_head(&store, "q").await;
     store
-        .apply_outcomes(vec![Outcome::Release { claim }].into(), NOW_MS)
+        .apply_outcomes(vec![Outcome::Release { claim }].into(), CLOCK_MS)
         .await
         .unwrap();
-    let again = store.peek("q".into(), 1, NOW_MS).await.unwrap().remove(0);
+    let again = store.peek("q".into(), 1, CLOCK_MS).await.unwrap().remove(0);
     assert_eq!(again.key, head.key);
     let (_, second) = claim_head(&store, "q").await;
     assert_ne!(second.claim_id, 0);
@@ -500,7 +537,7 @@ pub async fn release_restores_the_original_position(store: Store) {
 
 pub async fn retry_waits_until_due(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
     let (head, claim) = claim_head(&store, "q").await;
@@ -511,26 +548,26 @@ pub async fn retry_waits_until_due(store: Store) {
             vec![Outcome::Retry {
                 claim,
                 envelope: env,
-                due_ms: NOW_MS + 500,
+                due_ms: CLOCK_MS + 500,
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
-    store.promote_due_retries(NOW_MS + 499, 10).await.unwrap();
-    assert!(!store.has_pending("q".into(), NOW_MS + 499).await.unwrap());
+    store.promote_due_retries(CLOCK_MS + 499, 10).await.unwrap();
+    assert!(!store.has_pending("q".into(), CLOCK_MS + 499).await.unwrap());
     assert!(
         store
-            .peek("q".into(), 10, NOW_MS + 499)
+            .peek("q".into(), 10, CLOCK_MS + 499)
             .await
             .unwrap()
             .is_empty()
     );
-    store.promote_due_retries(NOW_MS + 500, 10).await.unwrap();
-    assert!(store.has_pending("q".into(), NOW_MS + 500).await.unwrap());
+    store.promote_due_retries(CLOCK_MS + 500, 10).await.unwrap();
+    assert!(store.has_pending("q".into(), CLOCK_MS + 500).await.unwrap());
     let head = store
-        .peek("q".into(), 10, NOW_MS + 500)
+        .peek("q".into(), 10, CLOCK_MS + 500)
         .await
         .unwrap()
         .remove(0);
@@ -539,10 +576,13 @@ pub async fn retry_waits_until_due(store: Store) {
 
 pub async fn request_status_follows_the_generation(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 100)])
+        .submit(vec![new_request("a", "q", at(100))])
         .await
         .unwrap();
-    let token = new_request("a", "q", 100).envelope.routing.request_token;
+    let token = new_request("a", "q", at(100))
+        .envelope
+        .routing
+        .request_token;
     let status = |token: &str| store.request_status("a".into(), Some(token.into()));
     assert_eq!(status(&token).await.unwrap(), RequestStatus::Queued);
     assert_eq!(status("other").await.unwrap(), RequestStatus::Done);
@@ -567,16 +607,16 @@ pub async fn request_status_follows_the_generation(store: Store) {
             vec![Outcome::Retry {
                 claim,
                 envelope: env.clone(),
-                due_ms: NOW_MS,
+                due_ms: CLOCK_MS,
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
     assert_eq!(status(&token).await.unwrap(), RequestStatus::Queued);
 
-    store.promote_due_retries(NOW_MS, 10).await.unwrap();
+    store.promote_due_retries(CLOCK_MS, 10).await.unwrap();
     let (head, claim) = claim_head(&store, "q").await;
     assert_eq!(status(&token).await.unwrap(), RequestStatus::InProgress);
     let env = head.envelope.unwrap();
@@ -588,7 +628,7 @@ pub async fn request_status_follows_the_generation(store: Store) {
                 envelope: env,
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
@@ -597,25 +637,25 @@ pub async fn request_status_follows_the_generation(store: Store) {
 
 pub async fn cancel_marks_only_the_live_generation(store: Store) {
     store
-        .submit(vec![new_request("a", "q", 2_000)])
+        .submit(vec![new_request("a", "q", at(2_000))])
         .await
         .unwrap();
     assert_eq!(
         store
-            .cancel(vec!["a".into(), "missing".into(), "".into()], NOW_MS)
+            .cancel(vec!["a".into(), "missing".into(), "".into()], CLOCK_MS)
             .await
             .unwrap(),
         1
     );
     assert!(
         store
-            .is_cancelled("a".into(), "61".into(), NOW_MS)
+            .is_cancelled("a".into(), "61".into(), CLOCK_MS)
             .await
             .unwrap()
     );
     assert!(
         !store
-            .is_cancelled("a".into(), "other".into(), NOW_MS)
+            .is_cancelled("a".into(), "other".into(), CLOCK_MS)
             .await
             .unwrap()
     );
@@ -624,31 +664,37 @@ pub async fn cancel_marks_only_the_live_generation(store: Store) {
         .apply_outcomes(
             vec![Outcome::Finish {
                 claim,
-                envelope: envelope("a", "61", "q", 2_000),
-                result: ResultMessage::cancelled(&envelope("a", "61", "q", 2_000)),
+                envelope: envelope("a", "61", "q", at(2_000)),
+                result: ResultMessage::cancelled(&envelope("a", "61", "q", at(2_000))),
             }]
             .into(),
-            NOW_MS,
+            CLOCK_MS,
         )
         .await
         .unwrap();
-    let mut again = new_request("a", "q", 2_000);
+    let mut again = new_request("a", "q", at(2_000));
     again.envelope.routing.request_token = "62".into();
     store.submit(vec![again]).await.unwrap();
     assert!(
         !store
-            .is_cancelled("a".into(), "62".into(), NOW_MS)
+            .is_cancelled("a".into(), "62".into(), CLOCK_MS)
             .await
             .unwrap()
     );
 }
 
 pub async fn cancel_after_deadline_is_a_noop(store: Store) {
-    store.submit(vec![new_request("a", "q", 10)]).await.unwrap();
-    assert_eq!(store.cancel(vec!["a".into()], 10_000).await.unwrap(), 0);
+    store
+        .submit(vec![new_request("a", "q", at(10))])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.cancel(vec!["a".into()], at_ms(10_000)).await.unwrap(),
+        0
+    );
     assert!(
         !store
-            .is_cancelled("a".into(), "61".into(), 10_000)
+            .is_cancelled("a".into(), "61".into(), at_ms(10_000))
             .await
             .unwrap()
     );
@@ -657,22 +703,25 @@ pub async fn cancel_after_deadline_is_a_noop(store: Store) {
 pub async fn backlog_counts_deadline_buckets(store: Store) {
     store
         .submit(vec![
-            new_request("expired", "q", 90),
-            new_request("now", "q", 100),
-            new_request("soon", "q", 105),
-            new_request("later", "q", 1000),
-            new_request("elsewhere", "r", 100),
+            new_request("expired", "q", at(90)),
+            new_request("now", "q", at(100)),
+            new_request("soon", "q", at(105)),
+            new_request("later", "q", at(1000)),
+            new_request("elsewhere", "r", at(100)),
         ])
         .await
         .unwrap();
     let b = store
-        .backlog("q".into(), 100_000, vec![-1, 0, 5, 60])
+        .backlog("q".into(), at_ms(100_000), vec![-1, 0, 5, 60])
         .await
         .unwrap();
     assert_eq!(b.depth, 4);
     assert_eq!(b.cumulative, [1, 2, 3, 3]);
     let (_, _claim) = claim_head(&store, "q").await;
-    let b = store.backlog("q".into(), 100_000, vec![]).await.unwrap();
+    let b = store
+        .backlog("q".into(), at_ms(100_000), vec![])
+        .await
+        .unwrap();
     assert_eq!(b.depth, 3);
 }
 
@@ -685,7 +734,7 @@ where
 {
     let mut reqs = Vec::new();
     for id in ids {
-        let mut r = new_request(id, "q", 100);
+        let mut r = new_request(id, "q", at(100));
         r.envelope.routing.result_ttl_seconds = ttl_s;
         reqs.push(r);
     }
@@ -702,7 +751,7 @@ where
                     result,
                 }]
                 .into(),
-                NOW_MS,
+                CLOCK_MS,
             )
             .await
             .unwrap();
@@ -741,26 +790,32 @@ fn id_of(body: &str) -> String {
 pub async fn pop_is_fifo(store: Store) {
     finish(&store, &["a", "b"], 0).await;
     assert_eq!(
-        store.result_depth("results".into(), NOW_MS).await.unwrap(),
+        store
+            .result_depth("results".into(), CLOCK_MS)
+            .await
+            .unwrap(),
         2
     );
     let first = store
-        .pop_result("results".into(), NOW_MS)
+        .pop_result("results".into(), CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
     let second = store
-        .pop_result("results".into(), NOW_MS)
+        .pop_result("results".into(), CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
     assert_eq!((id_of(&first), id_of(&second)), ("a".into(), "b".into()));
     assert_eq!(
-        store.pop_result("results".into(), NOW_MS).await.unwrap(),
+        store.pop_result("results".into(), CLOCK_MS).await.unwrap(),
         None
     );
     assert_eq!(
-        store.pop_result("elsewhere".into(), NOW_MS).await.unwrap(),
+        store
+            .pop_result("elsewhere".into(), CLOCK_MS)
+            .await
+            .unwrap(),
         None
     );
 }
@@ -769,16 +824,16 @@ pub async fn expired_results_are_skipped_and_swept(store: Store) {
     finish(&store, &["a"], 10).await;
     assert_eq!(
         store
-            .pop_result("results".into(), NOW_MS + 10_000)
+            .pop_result("results".into(), CLOCK_MS + 10_000)
             .await
             .unwrap(),
         None
     );
     finish(&store, &["b"], 10).await;
-    assert_eq!(store.sweep(NOW_MS + 9_999).await.unwrap(), 0);
-    assert!(store.sweep(NOW_MS + 10_000).await.unwrap() >= 1);
+    assert_eq!(store.sweep(CLOCK_MS + 9_999).await.unwrap(), 0);
+    assert!(store.sweep(CLOCK_MS + 10_000).await.unwrap() >= 1);
     assert_eq!(
-        store.pop_result("results".into(), NOW_MS).await.unwrap(),
+        store.pop_result("results".into(), CLOCK_MS).await.unwrap(),
         None
     );
 }
@@ -787,55 +842,55 @@ pub async fn claim_ack_is_idempotent_and_fenced(store: Store) {
     finish(&store, &["a"], 0).await;
     let route = || "results".to_string();
     let ResultClaim { claim_id, body } = store
-        .claim_result(route(), "me".into(), 1_000, NOW_MS)
+        .claim_result(route(), "me".into(), 1_000, CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(id_of(&body), "a");
-    assert_eq!(store.result_depth(route(), NOW_MS).await.unwrap(), 0);
+    assert_eq!(store.result_depth(route(), CLOCK_MS).await.unwrap(), 0);
     assert_eq!(
         store
-            .claim_result(route(), "other".into(), 1_000, NOW_MS)
+            .claim_result(route(), "other".into(), 1_000, CLOCK_MS)
             .await
             .unwrap(),
         None
     );
     assert!(
         !store
-            .renew_result(route(), claim_id, "other".into(), 1_000, NOW_MS)
+            .renew_result(route(), claim_id, "other".into(), 1_000, CLOCK_MS)
             .await
             .unwrap()
     );
     assert!(
         store
-            .renew_result(route(), claim_id, "me".into(), 1_000, NOW_MS + 500)
+            .renew_result(route(), claim_id, "me".into(), 1_000, CLOCK_MS + 500)
             .await
             .unwrap()
     );
     assert_eq!(
         store
-            .ack_result(route(), claim_id, "other".into(), NOW_MS + 600)
+            .ack_result(route(), claim_id, "other".into(), CLOCK_MS + 600)
             .await
             .unwrap(),
         AckOutcome::OwnershipLost
     );
     assert_eq!(
         store
-            .ack_result(route(), claim_id, "me".into(), NOW_MS + 600)
+            .ack_result(route(), claim_id, "me".into(), CLOCK_MS + 600)
             .await
             .unwrap(),
         AckOutcome::Acked
     );
     assert_eq!(
         store
-            .ack_result(route(), claim_id, "me".into(), NOW_MS + 700)
+            .ack_result(route(), claim_id, "me".into(), CLOCK_MS + 700)
             .await
             .unwrap(),
         AckOutcome::AlreadyAcked
     );
     assert_eq!(
         store
-            .claim_result(route(), "me".into(), 1_000, NOW_MS)
+            .claim_result(route(), "me".into(), 1_000, CLOCK_MS)
             .await
             .unwrap(),
         None
@@ -846,13 +901,13 @@ pub async fn lapsed_lease_is_redelivered_in_order(store: Store) {
     finish(&store, &["a", "b"], 0).await;
     let route = || "results".to_string();
     let first = store
-        .claim_result(route(), "crashed".into(), 1_000, NOW_MS)
+        .claim_result(route(), "crashed".into(), 1_000, CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(id_of(&first.body), "a");
     let again = store
-        .claim_result(route(), "survivor".into(), 1_000, NOW_MS + 1_000)
+        .claim_result(route(), "survivor".into(), 1_000, CLOCK_MS + 1_000)
         .await
         .unwrap()
         .unwrap();
@@ -865,20 +920,20 @@ pub async fn lapsed_lease_is_redelivered_in_order(store: Store) {
                 first.claim_id,
                 "crashed".into(),
                 1_000,
-                NOW_MS + 1_000
+                CLOCK_MS + 1_000
             )
             .await
             .unwrap()
     );
     assert_eq!(
         store
-            .ack_result(route(), first.claim_id, "crashed".into(), NOW_MS + 1_000)
+            .ack_result(route(), first.claim_id, "crashed".into(), CLOCK_MS + 1_000)
             .await
             .unwrap(),
         AckOutcome::OwnershipLost
     );
     let next = store
-        .claim_result(route(), "survivor".into(), 1_000, NOW_MS + 1_000)
+        .claim_result(route(), "survivor".into(), 1_000, CLOCK_MS + 1_000)
         .await
         .unwrap()
         .unwrap();
@@ -888,14 +943,14 @@ pub async fn lapsed_lease_is_redelivered_in_order(store: Store) {
 pub async fn ack_deletes_the_result_blob(store: Store) {
     let key = finish_by_reference(&store, "a", 0).await;
     let (body, content_type) = store
-        .open_result_blob(key.clone(), NOW_MS)
+        .open_result_blob(key.clone(), CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
     assert_eq!((body.size, content_type.as_str()), (11, "audio/wav"));
     assert_eq!(read_all(body).await.unwrap(), b"audio-bytes");
     let claim = store
-        .claim_result("results".into(), "me".into(), 1_000, NOW_MS)
+        .claim_result("results".into(), "me".into(), 1_000, CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
@@ -903,12 +958,12 @@ pub async fn ack_deletes_the_result_blob(store: Store) {
     assert_eq!(msg.payload_ref, key.to_ref());
     assert_eq!(msg.payload_size, 11);
     store
-        .ack_result("results".into(), claim.claim_id, "me".into(), NOW_MS)
+        .ack_result("results".into(), claim.claim_id, "me".into(), CLOCK_MS)
         .await
         .unwrap();
     assert!(
         store
-            .open_result_blob(key.clone(), NOW_MS)
+            .open_result_blob(key.clone(), CLOCK_MS)
             .await
             .unwrap()
             .is_none()
@@ -918,10 +973,10 @@ pub async fn ack_deletes_the_result_blob(store: Store) {
 
 pub async fn queued_result_keeps_its_blob_past_the_retention(store: Store) {
     let key = finish_by_reference(&store, "a", 0).await;
-    store.sweep(NOW_MS + 10 * 3_600_000).await.unwrap();
+    store.sweep(CLOCK_MS + 10 * 3_600_000).await.unwrap();
     assert!(
         store
-            .open_result_blob(key, NOW_MS + 10 * 3_600_000)
+            .open_result_blob(key, CLOCK_MS + 10 * 3_600_000)
             .await
             .unwrap()
             .is_some()
@@ -932,21 +987,21 @@ pub async fn popped_result_blob_expires_with_retention_or_ttl(store: Store) {
     let retained = finish_by_reference(&store, "a", 0).await;
     let ttl = finish_by_reference(&store, "b", 5).await;
     store
-        .pop_result("results".into(), NOW_MS)
+        .pop_result("results".into(), CLOCK_MS)
         .await
         .unwrap()
         .unwrap();
     assert!(
         store
-            .open_result_blob(retained.clone(), NOW_MS)
+            .open_result_blob(retained.clone(), CLOCK_MS)
             .await
             .unwrap()
             .is_some()
     );
-    store.sweep(NOW_MS + 5_000).await.unwrap();
+    store.sweep(CLOCK_MS + 5_000).await.unwrap();
     assert!(
         store
-            .open_result_blob(ttl.clone(), NOW_MS + 5_000)
+            .open_result_blob(ttl.clone(), CLOCK_MS + 5_000)
             .await
             .unwrap()
             .is_none()
@@ -954,12 +1009,12 @@ pub async fn popped_result_blob_expires_with_retention_or_ttl(store: Store) {
     assert!(!blob_exists(&store, &ttl).await);
     assert!(
         store
-            .open_result_blob(retained.clone(), NOW_MS + 5_000)
+            .open_result_blob(retained.clone(), CLOCK_MS + 5_000)
             .await
             .unwrap()
             .is_some()
     );
-    store.sweep(NOW_MS + 3_600_000).await.unwrap();
+    store.sweep(CLOCK_MS + 3_600_000).await.unwrap();
     assert!(!blob_exists(&store, &retained).await);
 }
 
