@@ -16,6 +16,7 @@ use crate::store::embedded::EmbeddedStore;
 use crate::store::error::StoreError;
 use crate::store::postgres::connect::Database;
 use crate::store::postgres::{PgStore, PostgresOptions};
+use crate::store::redis::{RedisOptions, RedisStore};
 use crate::store::signal::ResultSignal;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,15 @@ pub enum Backend {
         max_connections: usize,
         ca_cert: Option<PathBuf>,
         lease_ttl: Duration,
+    },
+    /// Shared by every replica, and by upstream's Go producers and
+    /// dispatchers.
+    Redis {
+        url: String,
+        retry_queue: String,
+        claim_lease: Duration,
+        reclaim_interval: Duration,
+        slot_ttl: Duration,
     },
 }
 
@@ -76,7 +86,7 @@ fn url_of(location: &BlobLocation) -> Result<&str, StoreError> {
     match location {
         BlobLocation::Object(url) => Ok(url),
         other => Err(StoreError::Config(format!(
-            "{other:?} blobs cannot be shared by Postgres replicas"
+            "{other:?} blobs cannot be shared by replicas"
         ))),
     }
 }
@@ -85,6 +95,18 @@ impl StoreConfig {
     fn blob_location(&self) -> Result<BlobLocation, StoreError> {
         match (&self.backend, &self.blobs) {
             (Backend::Embedded { .. }, None) => Ok(BlobLocation::Local),
+            (Backend::Redis { .. }, None) => Err(StoreError::Config(
+                "--store redis needs --blob-store: an object store URL (s3://bucket/prefix, or \
+                 file:///path on one host) for request and result bodies that cannot travel inline"
+                    .into(),
+            )),
+            (Backend::Redis { .. }, Some(BlobLocation::Local | BlobLocation::Postgres)) => {
+                Err(StoreError::Config(
+                    "--store redis keeps large bodies in an object store; use --blob-store with \
+                     s3://, gs://, az:// or file://"
+                        .into(),
+                ))
+            }
             (Backend::Postgres { .. }, None) => Err(StoreError::Config(
                 "--store postgres needs --blob-store: an object store URL (s3://bucket/prefix) \
                  for request and result bodies over --inline-payload-limit, or 'postgres' to \
@@ -155,6 +177,27 @@ impl StoreConfig {
                 };
                 let store = PgStore::open(db, blobs, &options, results).await?;
                 let counters = Arc::new(store.counters());
+                Ok(Opened {
+                    store: Arc::new(store),
+                    counters,
+                })
+            }
+            Backend::Redis {
+                url,
+                retry_queue,
+                claim_lease,
+                reclaim_interval,
+                slot_ttl,
+            } => {
+                let blobs = BlobStore::new(Arc::new(ObjectBlobs::from_url(url_of(&location)?)?));
+                let options = RedisOptions {
+                    claim_lease: *claim_lease,
+                    reclaim_interval: *reclaim_interval,
+                    retry_queue: retry_queue.clone(),
+                    result_blob_retention: self.result_blob_retention,
+                };
+                let store = RedisStore::open(url, blobs, options, results).await?;
+                let counters = Arc::new(store.counters(*slot_ttl));
                 Ok(Opened {
                     store: Arc::new(store),
                     counters,

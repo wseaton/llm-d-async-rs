@@ -1,6 +1,6 @@
 //! Durable queue state behind [`QueueStore`].
 //!
-//! Two backends implement it:
+//! Three backends implement it:
 //!
 //! - [`embedded`]: redb in a local directory. One process owns it, so a claim
 //!   is a plain row and every claim a dead process held returns to its queue
@@ -8,6 +8,9 @@
 //! - [`postgres`]: shared by any number of replicas. Each queue hashes into
 //!   partitions that replicas lease; a claim is fenced by its partition lease
 //!   and a per-dispatch attempt number.
+//! - [`redis`]: upstream llm-d-async's `redis-sortedset` layout, shared with
+//!   its Go producers and dispatchers. A claim is a lease every holder renews
+//!   and any replica reclaims once it lapses.
 //!
 //! Request and result bodies live apart from the queue in a [`BlobStore`].
 
@@ -17,6 +20,7 @@ pub mod embedded;
 pub mod error;
 pub mod postgres;
 pub mod queue;
+pub mod redis;
 pub mod signal;
 pub mod staging;
 

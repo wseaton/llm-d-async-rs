@@ -24,7 +24,13 @@ pub enum StoreError {
     Postgres(#[from] tokio_postgres::Error),
     #[error("postgres pool: {0}")]
     Pool(#[from] deadpool_postgres::PoolError),
-    #[error("postgres config: {0}")]
+    #[error("redis: {0}")]
+    Redis(#[from] ::redis::RedisError),
+    #[error("redis reply: {0}")]
+    RedisReply(#[from] ::redis::ParsingError),
+    #[error("redis envelope: {0}")]
+    Wire(#[from] crate::store::redis::wire::WireError),
+    #[error("store config: {0}")]
     Config(String),
     #[error("request store is closed")]
     Closed,

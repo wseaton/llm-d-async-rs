@@ -14,6 +14,9 @@ pub enum StoreKind {
     Embedded,
     /// Postgres at --database-url, shared by every replica.
     Postgres,
+    /// Redis at --redis-url, in upstream llm-d-async's `redis-sortedset`
+    /// layout: shared by every replica, and by Go producers and dispatchers.
+    Redis,
 }
 
 /// Asynchronous dispatch processor for llm-d.
@@ -40,6 +43,22 @@ pub struct Cli {
     /// outlive its last heartbeat.
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub partition_lease_ttl: Duration,
+    /// Redis connection URL (`redis://`, `rediss://` for TLS).
+    #[arg(long, env = "REDIS_URL", hide_env_values = true)]
+    pub redis_url: Option<String>,
+    /// The sorted set Redis retries wait in, shared with Go dispatchers.
+    #[arg(long, default_value = "retry-sortedset")]
+    pub redis_retry_queue: String,
+    /// How long a Redis request claim lasts unless its holder renews it.
+    #[arg(long, default_value = "300s", value_parser = parse_duration)]
+    pub claim_lease_ttl: Duration,
+    /// How often lapsed Redis claims are returned to their queues.
+    #[arg(long, default_value = "15s", value_parser = parse_duration)]
+    pub claim_reclaim_interval: Duration,
+    /// How long a Redis quota slot counter outlives its last use; the only
+    /// thing that frees slots a crashed process held.
+    #[arg(long, default_value = "300s", value_parser = parse_duration)]
+    pub quota_slot_ttl: Duration,
     /// Where request bodies over --inline-payload-limit and binary results
     /// (audio, images) go. With --store postgres, an object store URL
     /// (`s3://bucket/prefix`, `gs://`, `az://`, `file://`) is required;
@@ -166,6 +185,17 @@ impl Cli {
                 ca_cert: self.database_ca_cert.clone(),
                 lease_ttl: self.partition_lease_ttl,
             },
+            StoreKind::Redis => Backend::Redis {
+                url: self
+                    .redis_url
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| ConfigError::Cli("--store redis requires --redis-url".into()))?,
+                retry_queue: self.redis_retry_queue.clone(),
+                claim_lease: self.claim_lease_ttl,
+                reclaim_interval: self.claim_reclaim_interval,
+                slot_ttl: self.quota_slot_ttl,
+            },
         };
         let config = StoreConfig {
             backend,
@@ -187,6 +217,20 @@ impl Cli {
         if self.partition_lease_ttl.is_zero() {
             return Err(ConfigError::Cli(
                 "--partition-lease-ttl must be positive".into(),
+            ));
+        }
+        for (flag, d) in [
+            ("--claim-lease-ttl", self.claim_lease_ttl),
+            ("--claim-reclaim-interval", self.claim_reclaim_interval),
+            ("--quota-slot-ttl", self.quota_slot_ttl),
+        ] {
+            if d.is_zero() {
+                return Err(ConfigError::Cli(format!("{flag} must be positive")));
+            }
+        }
+        if self.redis_retry_queue.is_empty() {
+            return Err(ConfigError::Cli(
+                "--redis-retry-queue must not be empty".into(),
             ));
         }
         self.store_config()?;
@@ -256,7 +300,52 @@ mod tests {
         s3.extend(["--blob-store", "s3://bucket/p"]);
         parse(&s3).validate().unwrap();
         assert!(Cli::try_parse_from(["x", "--blob-store", "bucket"]).is_err());
-        assert!(Cli::try_parse_from(["x", "--store", "redis"]).is_err());
+    }
+
+    #[test]
+    fn redis_needs_a_url_and_an_object_store() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["x", "--transport-config", "{}", "--store", "redis"];
+            all.extend_from_slice(args);
+            Cli {
+                redis_url: None,
+                ..Cli::try_parse_from(all).unwrap()
+            }
+        };
+        let with_url = |args: &[&str]| Cli {
+            redis_url: Some("redis://r:6379".into()),
+            ..parse(args)
+        };
+        assert!(parse(&["--blob-store", "s3://b/p"]).validate().is_err());
+        assert!(
+            with_url(&[]).validate().is_err(),
+            "large bodies need a store"
+        );
+        assert!(with_url(&["--blob-store", "local"]).validate().is_err());
+        assert!(with_url(&["--blob-store", "postgres"]).validate().is_err());
+        let ok = with_url(&["--blob-store", "file:///tmp/blobs"]);
+        ok.validate().unwrap();
+        assert_eq!(ok.claim_lease_ttl, Duration::from_secs(300));
+        assert_eq!(ok.claim_reclaim_interval, Duration::from_secs(15));
+        assert_eq!(ok.quota_slot_ttl, Duration::from_secs(300));
+        assert_eq!(ok.redis_retry_queue, "retry-sortedset");
+        for flag in [
+            "--claim-lease-ttl",
+            "--claim-reclaim-interval",
+            "--quota-slot-ttl",
+        ] {
+            assert!(
+                with_url(&["--blob-store", "file:///b", flag, "0s"])
+                    .validate()
+                    .is_err(),
+                "{flag}"
+            );
+        }
+        assert!(
+            with_url(&["--blob-store", "file:///b", "--redis-retry-queue", ""])
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
