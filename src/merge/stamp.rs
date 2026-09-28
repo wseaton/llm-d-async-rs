@@ -11,7 +11,8 @@ use crate::merge::headers::Headers;
 const MAX_IDENTITY_LEN: usize = 256;
 
 /// Headers every policy sends: the payload's Content-Type, the queue's
-/// objective, the caller's headers, then the fairness identity.
+/// objective, the caller's headers, the escalated objective of a request
+/// retried past the queue's escalation, then the fairness identity.
 pub fn base_headers(
     source: &SourceMeta,
     envelope: &InternalRequest,
@@ -24,6 +25,9 @@ pub fn base_headers(
     }
     for (k, v) in &envelope.request.headers {
         h.set(k, v);
+    }
+    if let Some(objective) = source.escalated_objective(envelope) {
+        h.set(headers::OBJECTIVE, objective);
     }
     stamp_fairness(&mut h, envelope, fairness);
     h
@@ -50,6 +54,7 @@ mod tests {
     use reqwest::header::HeaderName;
 
     use crate::config::merge_policy::Fairness;
+    use crate::config::transport::Escalation;
     use crate::dispatch::message::SourceMeta;
     use crate::merge::stamp::base_headers;
     use crate::store::test_support::envelope;
@@ -62,6 +67,7 @@ mod tests {
             request_path: "/v1/completions".into(),
             inference_objective: objective.into(),
             render_url: None,
+            escalation: None,
         }
     }
 
@@ -104,6 +110,46 @@ mod tests {
         let h = base_headers(&source("batch"), &env, &fairness(None));
         assert_eq!(h.get("x-llm-d-inference-objective"), Some("urgent"));
         assert_eq!(h.to_header_map().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_request_retried_past_the_escalation_takes_its_objective() {
+        let mut source = source("batch");
+        source.escalation = Some(Escalation {
+            after_retries: 2,
+            objective: "interactive".into(),
+        });
+        let mut env = envelope("a", "t", "q", 1);
+        env.request
+            .headers
+            .insert("x-llm-d-inference-objective".into(), "caller".into());
+        for (retries, want) in [
+            (0, "caller"),
+            (1, "caller"),
+            (2, "interactive"),
+            (7, "interactive"),
+        ] {
+            env.routing.retry_count = retries;
+            let h = base_headers(&source, &env, &fairness(None));
+            assert_eq!(
+                h.get("x-llm-d-inference-objective"),
+                Some(want),
+                "{retries}"
+            );
+        }
+
+        env.request.headers.clear();
+        env.routing.retry_count = 1;
+        let h = base_headers(&source, &env, &fairness(None));
+        assert_eq!(h.get("x-llm-d-inference-objective"), Some("batch"));
+    }
+
+    #[test]
+    fn without_escalation_retries_keep_the_objective() {
+        let mut env = envelope("a", "t", "q", 1);
+        env.routing.retry_count = 100;
+        let h = base_headers(&source("batch"), &env, &fairness(None));
+        assert_eq!(h.get("x-llm-d-inference-objective"), Some("batch"));
     }
 
     #[test]

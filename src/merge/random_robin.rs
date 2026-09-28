@@ -126,6 +126,7 @@ mod tests {
                         request_path: "/v1/completions".into(),
                         inference_objective: String::new(),
                         render_url: None,
+                        escalation: None,
                     }),
                     rx,
                 })

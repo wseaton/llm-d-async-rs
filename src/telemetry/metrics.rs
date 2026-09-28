@@ -71,6 +71,7 @@ pub struct Metrics {
     retries: IntCounterVec,
     resumes: IntCounterVec,
     resumed_tokens: IntCounterVec,
+    escalations: IntCounterVec,
     async_requests: IntCounterVec,
     dispatched: IntCounterVec,
     gate_wait_requeues: IntCounterVec,
@@ -173,6 +174,12 @@ impl Metrics {
                 &r,
                 "async_resumed_tokens_total",
                 "Output tokens saved at interruptions, which continuations did not decode again.",
+                q,
+            )?,
+            escalations: counter(
+                &r,
+                "async_request_escalations_total",
+                "Requests retried enough times to be sent under the queue's escalated objective.",
                 q,
             )?,
             async_requests: counter(
@@ -367,6 +374,9 @@ impl Metrics {
         self.resumed_tokens
             .with_label_values(&l.values())
             .inc_by(saved_tokens as u64);
+    }
+    pub fn escalation(&self, l: &QueueLabels) {
+        self.escalations.with_label_values(&l.values()).inc();
     }
     pub fn async_request(&self, l: &QueueLabels) {
         self.async_requests.with_label_values(&l.values()).inc();

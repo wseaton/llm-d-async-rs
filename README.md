@@ -204,7 +204,8 @@ Durations use Go syntax (`90s`, `1h30m`, `250ms`), so existing values carry over
       "result_queue_name": "", "result_ttl_seconds": 0,
       "labels": {"tier": "batch"},
       "gate_type": "quota", "gate_params": {"mode": "concurrency", "limit": 8},
-      "render_url": null
+      "render_url": null,
+      "escalation": {"after_retries": 3, "objective": "interactive"}
     }
   ]
 }
@@ -215,7 +216,12 @@ Unknown fields are rejected. Redis-only fields (`url`, `retry_queue_name`,
 are the processor's own and cannot be configured. Each poll, a queue dispatches at
 most `batch_size × budget` requests, earliest deadline first. The queue's
 `inference_objective` is sent as `x-llm-d-inference-objective`; a request's own
-header replaces it. A `render_url` makes the queue
+header replaces it. `escalation` (optional) sends every attempt after
+`after_retries` retries under `objective`, replacing both. Retries count only
+attempts that ended without new output (a resume from saved tokens is not one),
+so a request that flow control keeps preempting before its first token stops
+starving. The first escalated attempt is logged as `escalating request` and
+counted in `async_request_escalations_total`. A `render_url` makes the queue
 [resumable](#resumable-queues).
 
 Pools (`pools.json`) and merge policies (`merge.json`) keep the Go format:

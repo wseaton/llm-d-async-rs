@@ -63,6 +63,20 @@ pub struct QueueConfig {
     /// interrupted generation continues from its saved tokens.
     #[serde(default)]
     pub render_url: Option<String>,
+    /// Raises the objective of a request flow control keeps preempting.
+    #[serde(default)]
+    pub escalation: Option<Escalation>,
+}
+
+/// Once a request has been retried `after_retries` times, each further
+/// attempt is sent under `objective`, replacing the queue's and the
+/// caller's objective. Retries count only attempts that ended without new
+/// output; a resume from saved tokens is not a retry.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Escalation {
+    pub after_retries: u32,
+    pub objective: String,
 }
 
 impl QueueConfig {
@@ -142,6 +156,22 @@ impl TransportConfig {
             {
                 return invalid(format!("queue {:?}: render_url: {e}", q.queue_name));
             }
+            if let Some(e) = &q.escalation {
+                if e.after_retries == 0 {
+                    return invalid(format!(
+                        "queue {:?}: escalation.after_retries must be positive",
+                        q.queue_name
+                    ));
+                }
+                if e.objective.is_empty()
+                    || reqwest::header::HeaderValue::from_str(&e.objective).is_err()
+                {
+                    return invalid(format!(
+                        "queue {:?}: escalation.objective must be a non-empty header value",
+                        q.queue_name
+                    ));
+                }
+            }
             if pools.get(&q.worker_pool_id).is_none() {
                 return invalid(format!(
                     "queue {:?}: worker pool {:?} not found in pool configuration",
@@ -160,7 +190,7 @@ impl TransportConfig {
 #[cfg(test)]
 mod tests {
     use crate::config::pools::{WorkerPoolConfig, WorkerPools};
-    use crate::config::transport::TransportConfig;
+    use crate::config::transport::{Escalation, TransportConfig};
 
     fn pools() -> WorkerPools {
         WorkerPools::new(vec![
@@ -186,6 +216,24 @@ mod tests {
         assert_eq!(q.worker_pool_id, "default");
         assert_eq!(q.request_path_url, "/v1/completions");
         assert_eq!(q.render_url, None);
+        assert_eq!(q.escalation, None);
+    }
+
+    #[test]
+    fn parses_escalation() {
+        let cfg = TransportConfig::parse(
+            br#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","escalation":{"after_retries":3,"objective":"interactive"}}]}"#,
+            &pools(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.queues[0].escalation,
+            Some(Escalation {
+                after_retries: 3,
+                objective: "interactive".into(),
+            })
+        );
     }
 
     #[test]
@@ -263,6 +311,26 @@ mod tests {
             (
                 r#"{"poll_interval_ms":0,"queues":[{"queue_name":"q","igw_base_url":"http://gw"}]}"#,
                 "poll_interval_ms",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","escalation":{"after_retries":0,"objective":"i"}}]}"#,
+                "escalation.after_retries must be positive",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","escalation":{"after_retries":2,"objective":""}}]}"#,
+                "escalation.objective must be a non-empty header value",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","escalation":{"after_retries":2,"objective":"a\nb"}}]}"#,
+                "escalation.objective must be a non-empty header value",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","escalation":{"after_retries":2}}]}"#,
+                "missing field `objective`",
+            ),
+            (
+                r#"{"queues":[{"queue_name":"q","igw_base_url":"http://gw","escalation":{"after_retries":2,"objective":"i","priority":5}}]}"#,
+                "unknown field `priority`",
             ),
             (
                 r#"{"url":"redis://x","queues":[{"queue_name":"q","igw_base_url":"http://gw"}]}"#,

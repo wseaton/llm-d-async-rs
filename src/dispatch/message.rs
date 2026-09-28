@@ -4,6 +4,7 @@ use std::time::Instant;
 use bytes::Bytes;
 
 use crate::api::request::InternalRequest;
+use crate::config::transport::Escalation;
 use crate::dispatch::claim::ClaimGuard;
 use crate::gate::release::Releases;
 use crate::merge::headers::Headers;
@@ -29,9 +30,19 @@ pub struct SourceMeta {
     pub inference_objective: String,
     /// The render server of a resumable queue.
     pub render_url: Option<String>,
+    pub escalation: Option<Escalation>,
 }
 
 impl SourceMeta {
+    /// The objective this attempt of `envelope` escalates to, once it has
+    /// been retried as often as the queue's escalation allows.
+    pub fn escalated_objective(&self, envelope: &InternalRequest) -> Option<&str> {
+        self.escalation
+            .as_ref()
+            .filter(|e| envelope.routing.retry_count >= e.after_retries)
+            .map(|e| e.objective.as_str())
+    }
+
     /// The queue's base URL joined with the request's endpoint, or the
     /// queue's default path.
     pub fn url_for(&self, envelope: &InternalRequest) -> String {
@@ -70,6 +81,7 @@ mod tests {
             request_path: "/v1/completions".into(),
             inference_objective: String::new(),
             render_url: None,
+            escalation: None,
         };
         let mut env = envelope("a", "t", "q", 1);
         assert_eq!(meta.url_for(&env), "http://gw:8000/v1/completions");

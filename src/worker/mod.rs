@@ -170,6 +170,17 @@ impl Worker {
         if envelope.routing.retry_count == 0 {
             self.metrics.async_request(labels);
         }
+        if let Some(e) = &source.escalation
+            && envelope.routing.retry_count == e.after_retries
+        {
+            tracing::info!(
+                request.id = %envelope.request.id,
+                retry_count = envelope.routing.retry_count,
+                objective = %e.objective,
+                "escalating request"
+            );
+            self.metrics.escalation(labels);
+        }
 
         let mut dispatching = Dispatching {
             url: &url,
@@ -650,6 +661,7 @@ mod tests {
     use crate::api::result::ErrorCode;
     use crate::boxed::BoxFuture;
     use crate::clock::now_millis;
+    use crate::config::transport::Escalation;
     use crate::dispatch::claim::Pending;
     use crate::dispatch::claim::{ClaimGuard, OutcomeSender};
     use crate::dispatch::message::{Claimed, Dispatch, SourceMeta};
@@ -822,6 +834,7 @@ mod tests {
                     request_path: String::new(),
                     inference_objective: String::new(),
                     render_url: None,
+                    escalation: None,
                 }),
                 url: url.into(),
                 headers: Headers::default(),
@@ -917,6 +930,36 @@ mod tests {
             ),
             Some(1.0)
         );
+    }
+
+    #[tokio::test]
+    async fn escalation_is_counted_once_on_the_first_escalated_attempt() {
+        let mut rig = Rig::embedded().await;
+        let gw = Gateway::replying(StatusCode::SERVICE_UNAVAILABLE, &[], "busy").await;
+        let worker = rig.worker(None);
+        let escalations = |rig: &Rig| {
+            rig.metrics
+                .sample(
+                    "async_request_escalations_total",
+                    &[("queue_id", "q"), ("pool_name", POOL)],
+                )
+                .unwrap_or(0.0)
+        };
+        for (id, retries, want) in [("r1", 1, 0.0), ("r2", 2, 1.0), ("r3", 3, 1.0)] {
+            let mut dispatch = rig.dispatch(id, secs_from_now(600), &gw.url).await;
+            dispatch.claimed.envelope.routing.retry_count = retries;
+            dispatch.source = Arc::new(SourceMeta {
+                escalation: Some(Escalation {
+                    after_retries: 2,
+                    objective: "interactive".into(),
+                }),
+                ..(*dispatch.source).clone()
+            });
+            process(&worker, dispatch).await;
+            let (envelope, _) = retried(rig.outcome());
+            assert_eq!(envelope.routing.retry_count, retries + 1);
+            assert_eq!(escalations(&rig), want, "{id}");
+        }
     }
 
     #[tokio::test]
