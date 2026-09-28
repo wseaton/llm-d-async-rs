@@ -205,7 +205,7 @@ A Go client lives in [`clients/go`](clients/go)
 producer switches by construction alone, and adds batch and streamed
 submission, leased delivery (`ReceiveResult`/`RenewResult`/`AckResult`), and
 `OpenResultBody` for results stored by reference. Its tests run the real
-binary on both stores.
+binary on both stores. See its [README](clients/go/README.md).
 
 ### Results by request
 
